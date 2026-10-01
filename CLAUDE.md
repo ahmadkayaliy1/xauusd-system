@@ -10,3 +10,6 @@
 - Hard rules: no mock/simulated data on any path to a trading decision; every recommendation needs SL + risk;
   secrets only via `.env` (never logged); all timestamps int64 UTC ms, no naive datetimes (MT5 applies the local TZ to them).
 - Never send MT5 orders outside the demo-test phases the user approved; default execution mode is `paper`.
+- D-051: every pair is its own project folder (`C:\TradingSystems\<PAIR>`) — `config\config.yaml` names this folder's
+  one pair. Never read, write, stop, start or register anything of another pair's folder (docs/split_pairs.md); the
+  unit suite runs against `tests/fixtures/config_three_pairs.yaml` in every folder.

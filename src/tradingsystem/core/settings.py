@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import tempfile
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
@@ -30,6 +31,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = PROJECT_ROOT / "config" / "config.yaml"
 LOCAL_CONFIG = PROJECT_ROOT / "config" / "config.local.yaml"
 DEFAULT_ENV = PROJECT_ROOT / ".env"
+
+
+def cli_workdir() -> Path:
+    """The Claude Code CLI work folder (start stamp + lock, system-prompt files, the last stream): outside the project
+    folder, so a CLI never starts inside it, and one per project folder (D-051: every pair is its own folder and
+    shares no file with another one — the CLI start spacing is this system's own)."""
+    key = hashlib.sha1(os.path.normcase(str(PROJECT_ROOT)).encode()).hexdigest()[:10]
+    return Path(tempfile.gettempdir()) / f"tradingsystem-claude-code-{PROJECT_ROOT.name}-{key}"
 
 LIVE_CONFIRMATION_PHRASE = "I ACCEPT REAL-MONEY TRADING RISK"
 TELEGRAM_SECRET_ENV = ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")   # Phase 4 notifier (H18), read with secret()
@@ -582,6 +591,23 @@ class SupervisorCfg(_Model):
     mt5_task: str = "TradingSystem-MT5"      # scheduled task that starts the data terminal (scripts/install_autostart.ps1)
     child_log_max_bytes: int = 5 * 1024 * 1024   # logs/<service>.stderr.log rolled at (re)start above this
     child_log_backups: int = 2
+    # D-051: the Task Scheduler folder of this system's tasks (e.g. \TradingSystems\BTCUSDT\): every pair's project
+    # folder registers, finds and removes only the tasks in its own folder; a lone backslash = the root folder (as before)
+    task_folder: str = "\\"
+
+    @field_validator("task_folder")
+    @classmethod
+    def _folder(cls, v: str) -> str:
+        if not (v.startswith("\\") and v.endswith("\\")) or "/" in v or "\\\\" in v:
+            raise ValueError(r"supervisor.task_folder must start and end with a backslash, e.g. \TradingSystems\BTCUSDT\ ")
+        return v
+
+    def mt5_task_path(self) -> str:
+        """The MT5 terminal task's full name (``schtasks /TN``): in this system's task folder, unless ``mt5_task``
+        already names a folder."""
+        if "\\" in self.mt5_task or self.task_folder == "\\":
+            return self.mt5_task
+        return self.task_folder + self.mt5_task
 
 
 class AdaptiveSettings(_Model):
@@ -661,6 +687,17 @@ class OperatorCfg(_Model):
     weekly_pack_hours: int = Field(168, ge=1, le=720)
     summary_max_chars: int = Field(1500, ge=100, le=4000)
     record_usage: bool = True            # sessions are written to the shared AI ledger (role review / diagnose)
+    # D-051: when scripts/install_operator_tasks.ps1 schedules the reviews (UTC). Each pair's folder has its own
+    # sessions; their times are spaced so two folders' Claude sessions never run at the same time on this laptop
+    daily_utc: str = "04:30"
+    weekly_utc: str = "06:00"
+    weekly_day: Literal["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] = "Sunday"
+
+    @model_validator(mode="after")
+    def _times(self) -> "OperatorCfg":
+        _check_hhmm(self.daily_utc, "operator.daily_utc")
+        _check_hhmm(self.weekly_utc, "operator.weekly_utc")
+        return self
 
 
 class BackupCfg(_Model):
@@ -670,6 +707,12 @@ class BackupCfg(_Model):
     enabled: bool = True
     dir: str = "backups"             # relative to the project root (git-ignored) or absolute (e.g. another drive)
     keep: int = Field(14, ge=1, le=365)
+    daily_utc: str = "03:30"         # D-051: the daily task's time (scripts/install_operator_tasks.ps1), UTC
+
+    @model_validator(mode="after")
+    def _time(self) -> "BackupCfg":
+        _check_hhmm(self.daily_utc, "backup.daily_utc")
+        return self
 
 
 class EvaluationCfg(_Model):

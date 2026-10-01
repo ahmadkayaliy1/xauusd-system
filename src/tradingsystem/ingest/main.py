@@ -12,7 +12,7 @@ import signal
 import sys
 from pathlib import Path
 
-from ..core.instruments import InstrumentRegistry
+from ..core.instruments import InstrumentRegistry, sibling_feeds
 from ..core.logsetup import setup_from_settings
 from ..core.settings import Settings, load_settings
 
@@ -33,7 +33,11 @@ def run_binance(data_dir: str | None = None, backfill: bool = True) -> None:
     s = _settings(data_dir)
     setup_from_settings("ingest-binance", s)
     appdb = AppDB(s.paths.state() / "app.db")
-    svc = BinanceLiveService(s, InstrumentRegistry.from_settings(s), appdb)
+    # D-051: plus the candles of a correlated sibling no system of this folder records (BTC <-> ETH, live only)
+    feeds = sibling_feeds(s)
+    if feeds:
+        log.info("sibling candle feeds (D-051): %s", ", ".join(f.key for f in feeds))
+    svc = BinanceLiveService(s, InstrumentRegistry([*InstrumentRegistry.from_settings(s).all(), *feeds]), appdb)
     keeper = keeper_done = None
     if backfill:                  # one worker process per pass (A7), restarted with backoff if it dies (BF-03)
         from .binance.backfill import COLLECTOR, DAILY_RUN_UTC_HOUR, start_worker

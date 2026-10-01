@@ -42,6 +42,20 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-10-01 — one folder per pair (D-051).** The owner asked for the three pairs as three fully independent
+  systems, "no folder linked to another in any way" and "no change to any detail or idea". Built on
+  `feat/split-pairs` (worktree `C:\the_claude_new_wt\split`) and cloned into `C:\TradingSystems\XAUUSD`,
+  `…\BTCUSDT`, `…\ETHUSDT` (each its own git repository, no remote, its own venv and one-pair config). Code
+  changes, all layout-agnostic: process discovery / stop / the dashboard's process list / the recorder keep-alive see
+  only their own project folder (`procs.in_project`); the Claude CLI work folder is per folder
+  (`settings.cli_workdir`); BTC and ETH record each other's candles themselves when the sibling is not a system of
+  the same folder (`core.instruments.sibling_feeds`, live ingest); the recorder records the folder's pairs
+  (`recorded_symbols`); every Task Scheduler script works in `supervisor.task_folder` (`\TradingSystems\<PAIR>\`)
+  with the review/backup times from config (`operator.daily_utc/weekly_utc`, `backup.daily_utc`, read by
+  `tradingsystem config --tasks`); `tools/import_from_old.py` + `scripts\first_start.bat` do the switch per folder
+  (H33). The unit suite runs against `tests/fixtures/config_three_pairs.yaml`; `test_split_pairs.py` checks every
+  folder's config against it. The owner's choices and their consequences: D-051, docs/split_pairs.md.
+
 * **2026-09-29 — Phase 5 checkpoint B "goes deeper" (with the gold shadow desk, D-049) is DONE on
   `feat/phase5-goes-deeper` (worktree `C:\the_claude_new_wt\phase5`); production runs checkpoint A until the user's
   H26b.** 1686 unit tests. A first session (Sonnet) built B11, B13, B14, B12 + B15, B1–B5 + B16; a second (Opus)

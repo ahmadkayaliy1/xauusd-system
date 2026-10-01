@@ -2,6 +2,10 @@
 
 The MT5 terminal must never live in the supervisor's job or die with a child's tree (OPS-04): a child that calls
 ``mt5.initialize(path)`` on a closed terminal starts it as *its* child (CreateProcessW, D-023).
+
+D-051: every pair is its own project folder (``C:\\TradingSystems\\<PAIR>``). A supervisor is this system's only when
+its working folder or its executable lies in THIS project folder — another folder's system (another pair, an old
+checkout, a worktree) is never seen, counted, refused against or stopped from here.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from typing import IO, Iterable
 
 import psutil
 
+from ..core.settings import PROJECT_ROOT
 from .winops import CREATE_NO_WINDOW, WIN, spawn_outside
 
 log = logging.getLogger("supervisor")
@@ -135,10 +140,26 @@ def _proc_instance(p: psutil.Process, cmd: list[str]) -> str | None:
     return inst
 
 
+def in_project(p: psutil.Process, root: str | Path = PROJECT_ROOT) -> bool:
+    """D-051: the process belongs to the project folder ``root`` — its working folder (a venv launcher's interpreter
+    child inherits it; the supervisor and the scheduled tasks start in the project folder) or its executable (the
+    venv's python.exe) lies in it. Unreadable = not ours: nothing of another folder is ever stopped from here."""
+    base = _norm(root)
+    for get in (p.cwd, p.exe):
+        try:
+            path = _norm(get())
+        except (psutil.Error, OSError):
+            continue
+        if path == base or path.startswith(base.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
 def running_supervisors(older_s: float | None = None) -> dict[int, str | None]:
     """``{pid: instance}`` of other running supervisors of any build (older ones hold no single-instance lock),
     never ours; instance None = the all-pairs system. ``older_s``: only those started at least that long before this
-    process (two new starts racing for the lock must not both give up)."""
+    process (two new starts racing for the lock must not both give up). Only supervisors of THIS project folder
+    (:func:`in_project`, D-051)."""
     try:
         me = psutil.Process()
         mine = {me.pid, *(p.pid for p in me.parents()), *(c.pid for c in me.children(recursive=True))}
@@ -155,7 +176,7 @@ def running_supervisors(older_s: float | None = None) -> dict[int, str | None]:
             continue
         try:
             cmd = p.cmdline()
-            if not is_supervisor_cmd(cmd):
+            if not is_supervisor_cmd(cmd) or not in_project(p):
                 continue
             if older_s is not None and born is not None and p.create_time() > born - older_s:
                 continue

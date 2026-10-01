@@ -48,6 +48,7 @@ from ..core.killswitch import read_reason, set_kill_switch
 from ..core.settings import PROJECT_ROOT, Settings, load_settings
 from ..core.timeframes import Timeframe
 from ..core.timeutil import iso, now_ms, parse_date_spec
+from ..supervisor.procs import in_project
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
 
@@ -579,7 +580,8 @@ QUOTE_STALE_S = 600
 
 def _process_list() -> list[dict]:
     """Our processes and their RSS (cached 30 s). Only python processes are opened for their command line — reading
-    every process's command line costs seconds of CPU on Windows."""
+    every process's command line costs seconds of CPU on Windows. Ours = of THIS project folder (D-051: another pair's
+    folder is another system)."""
     if now_ms() - _PROC_CACHE["ts"] < _PROC_TTL_MS:
         return _PROC_CACHE["rows"]
     rows = []
@@ -588,7 +590,8 @@ def _process_list() -> list[dict]:
             continue
         try:
             cmd = " ".join(p.cmdline() or [])
-            if "tradingsystem" in cmd or "recorder.py" in cmd or ("multiprocessing" in cmd and "Python312" in cmd):
+            if ("tradingsystem" in cmd or "recorder.py" in cmd or ("multiprocessing" in cmd and "Python312" in cmd)) \
+                    and in_project(p):
                 rows.append({"pid": p.info["pid"], "rss_mb": round(p.memory_info().rss / 2**20), "cmd": cmd[-80:]})
         except (psutil.Error, TypeError):
             continue

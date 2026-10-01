@@ -21,6 +21,12 @@ class FakeProc:
     def create_time(self):
         return self._created
 
+    def cwd(self):                      # D-051: only supervisors of this project folder count
+        return str(procs.PROJECT_ROOT)
+
+    def exe(self):
+        return self._cmd[0]
+
 
 def test_the_scan_prefetches_names_only_and_reads_the_parent_of_supervisors_only(monkeypatch):
     sup = ["C:/x/.venv/Scripts/python.exe", "-m", "tradingsystem", "--instance", "BTCUSDT", "run", "all"]

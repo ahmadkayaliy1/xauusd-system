@@ -173,7 +173,7 @@ def test_recorder_pids_finds_a_running_recorder_process(tmp_path):
     script = tmp_path / "research" / "price_matching" / "recorder.py"
     script.parent.mkdir(parents=True)
     script.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
-    p = subprocess.Popen([sys.executable, str(script)])
+    p = subprocess.Popen([sys.executable, str(script)], cwd=str(ROOT))     # D-051: a recorder of THIS project folder
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and p.pid not in m.recorder_pids():

@@ -14,7 +14,7 @@ OEM code page):
 3. the prompt = the kind's checklist (``prompts/<kind>.md``) + the pack, written to ``<ts>_<kind>.prompt.md`` and fed
    to the CLI's stdin from that file; the command line and environment come from ``session_args.py`` (the review id
    goes into the environment as ``TS_OPERATOR_REVIEW_ID``: the tools record ``operator-session:<review id>``);
-4. the machine-wide CLI start stagger (``claude_code.claim_start``: the engines' OAuth refresh race) before
+4. the CLI start stagger (``claude_code.claim_start``: the engines' OAuth refresh race) before
    ``claude auth status`` (only a subscription sign-in is accepted, D-030) and again before ``claude -p``;
 5. ``claude -p`` with the working directory = this checkout, stdout/stderr to files under ``data/reviews/`` (never a
    pipe nobody reads), a time limit that ends the whole run inside ``operator.<kind>_timeout_min`` (the process tree is
@@ -50,7 +50,6 @@ import re
 import string
 import subprocess
 import sys
-import tempfile
 import time
 import types
 from pathlib import Path
@@ -63,7 +62,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from tradingsystem.ai.providers import claude_code as cc  # noqa: E402
 from tradingsystem.core.filelock import FileLock, locks_dir  # noqa: E402
 from tradingsystem.core.logsetup import get_redactor, setup_logging  # noqa: E402
-from tradingsystem.core.settings import Settings, load_settings  # noqa: E402
+from tradingsystem.core.settings import Settings, cli_workdir, load_settings  # noqa: E402
 from tradingsystem.core.timeutil import iso  # noqa: E402
 from tradingsystem.core.timeutil import now_ms as _now_ms  # noqa: E402
 
@@ -483,10 +482,10 @@ def _run_locked(kind: str, *, s: Settings, spec: Any, rp: types.ModuleType, rec:
     _write(rp.reviews_dir(s) / f"{review_id}.session.json", json.dumps(rec, ensure_ascii=False, indent=1, default=str))
     before = git_snapshot(spec.root)
     # ---- sign-in (a start of its own: staggered like every CLI start)
-    workdir = Path(tempfile.gettempdir()) / "tradingsystem-claude-code"
+    workdir = cli_workdir()          # D-051: this project folder's own CLI work folder
     if sa.TOKEN_ENV not in env:
         if not wait_for_start(workdir):
-            rec["error"] = "the machine-wide CLI start stagger did not clear"
+            rec["error"] = "the CLI start stagger did not clear"
             return finish("busy", EXIT_SKIPPED)
         try:
             problem = check_auth(spec.exe, env, workdir)
@@ -496,7 +495,7 @@ def _run_locked(kind: str, *, s: Settings, spec: Any, rp: types.ModuleType, rec:
             rec["error"] = problem[:300]
             return finish("not_signed_in", EXIT_FAILED, level="warn", title=f"{title} not run", text=rec["error"])
     if not wait_for_start(workdir):
-        rec["error"] = "the machine-wide CLI start stagger did not clear"
+        rec["error"] = "the CLI start stagger did not clear"
         return finish("busy", EXIT_SKIPPED)
     left = deadline - time.monotonic()
     if left < MIN_CLI_S:

@@ -337,7 +337,8 @@ class Supervisor:
                     continue                        # started by another system meanwhile
                 # the scheduled task (Task Scheduler creates it: no parent of ours, no job of ours); if a task start
                 # did not bring it up last time, start it detached instead
-                task = self.cfg.mt5_task if path == data_path and not (last and last[1].startswith("task")) else None
+                task = (self.cfg.mt5_task_path() if path == data_path and not (last and last[1].startswith("task"))
+                        else None)                  # D-051: in this system's own Task Scheduler folder
                 via = procs.launch_terminal(path, task)
                 self._term_launch[path] = (now, via)
                 log.warning("MT5 terminal was not running — started it (%s): %s", via, path)

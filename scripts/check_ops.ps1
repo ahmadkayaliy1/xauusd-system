@@ -7,6 +7,33 @@
 param()
 $ErrorActionPreference = "Continue"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+# D-051: this system's Task Scheduler folder (config supervisor.task_folder, "\" = the root folder as before) and task
+# times - every pair's project folder registers, finds and removes only the tasks in its own folder
+function Get-TaskConfig([string]$py, [string]$root) {
+    $cfg = @{}
+    Push-Location $root
+    try {
+        $lines = @(& { $ErrorActionPreference = "Continue"; & $py -m tradingsystem config --tasks })
+        $code = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($code -ne 0) { throw "could not read the task settings from config (python -m tradingsystem config --tasks)" }
+    foreach ($l in $lines) {
+        $kv = "$l" -split "=", 2
+        if ($kv.Count -eq 2) { $cfg[$kv[0].Trim()] = $kv[1].Trim() }
+    }
+    if (-not $cfg["task_folder"]) { throw "config --tasks printed no task_folder" }
+    return $cfg
+}
+function Split-TaskLine([string]$line) {
+    # one line of "schtasks /Query /FO CSV /NH": its first field is the task's full name "\Folder\Name"
+    $full = ($line -split '","')[0].Trim('"')
+    $cut = $full.LastIndexOf('\')
+    if ($cut -lt 0) { return @("\", $full) }
+    return @($full.Substring(0, $cut + 1), $full.Substring($cut + 1))
+}
+$taskFolder = "\"
+try { $taskFolder = (Get-TaskConfig (Join-Path $root ".venv\Scripts\python.exe") $root)["task_folder"] }
+catch { Write-Host "WARNING: $($_.Exception.Message) - the task checks below look at the root folder" }
 $script:todo = 0
 
 function Get-PowerIndex([string]$Sub, [string]$Setting) {
@@ -112,17 +139,19 @@ Write-Host "== Autostart (Task Scheduler) - docs\ops_windows.md section 6"
 # schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely (0x80041318)
 $tsNames = @()
 foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
-    $n = ($line -split '","')[0].Trim('"').TrimStart('\')
+    $folder, $n = Split-TaskLine $line
+    if ($folder -ne $taskFolder) { continue }              # D-051: another folder = another pair's system
     if ($n -eq "TradingSystem" -or ($n -like "TradingSystem-*" -and $n -ne "TradingSystem-MT5")) { $tsNames += $n }
 }
 $opsNames = @()      # Phase 4 operator tasks (scripts\install_operator_tasks.bat, docs\operator_sessions.md)
 foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
-    $n = ($line -split '","')[0].Trim('"').TrimStart('\')
+    $folder, $n = Split-TaskLine $line
+    if ($folder -ne $taskFolder) { continue }
     if ($n -like "TradingSystemOps-*") { $opsNames += $n }
 }
 if (-not $tsNames) { $tsNames = @("TradingSystem") }      # neither the all-pairs task nor a per-pair one (D-042)
 foreach ($name in @("TradingSystem-MT5") + @($tsNames | Sort-Object -Unique)) {
-    $q = schtasks /Query /TN $name /FO LIST /V 2>$null
+    $q = schtasks /Query /TN "$taskFolder$name" /FO LIST /V 2>$null
     if ($LASTEXITCODE -eq 0) {
         $field = { param($k) (($q | Select-String "^\s*$k\s*:" | Select-Object -First 1).Line -replace "^\s*$k\s*:\s*", "").Trim() }
         Write-Host ("info {0,-22} {1,-8} last run {2}  result {3}  next {4}" -f $name, (& $field "Status"),
@@ -133,7 +162,7 @@ if (-not $opsNames) {
     Write-Host "info TradingSystemOps-*      not registered (scripts\install_operator_tasks.bat - monitor, reviews, backup, recorder)"
 }
 foreach ($name in @($opsNames | Sort-Object -Unique)) {
-    $q = schtasks /Query /TN $name /FO LIST /V 2>$null
+    $q = schtasks /Query /TN "$taskFolder$name" /FO LIST /V 2>$null
     if ($LASTEXITCODE -eq 0) {
         $field = { param($k) (($q | Select-String "^\s*$k\s*:" | Select-Object -First 1).Line -replace "^\s*$k\s*:\s*", "").Trim() }
         Write-Host ("info {0,-28} {1,-8} last run {2}  result {3}  next {4}" -f $name, (& $field "Status"),

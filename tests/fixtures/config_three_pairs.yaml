@@ -1,0 +1,419 @@
+# TEST FIXTURE (D-051): the three-pair config.yaml as it was when the pairs were split into their own folders.
+# The unit suite runs against this file (tests/conftest.py), so it passes in every pair folder unchanged; each
+# folder's real config/config.yaml (one pair) is checked by tests/unit/test_split_pairs.py.
+# Automated Trading System — main configuration (no secrets here; secrets go in .env).
+# Local overrides: config/config.local.yaml (git-ignored, deep-merged over this file).
+# One-line switches via .env: ACTIVE_AI_PROVIDER, AGENT_MODE, TRIGGER_POLICY,
+# EXECUTION_MODE, EXECUTION_TRIGGER, RESOURCE_PROFILE, <PROVIDER>_MODEL.
+
+profile: standard            # low (4 GB RAM PCs) | standard
+
+timeframes: [1m, 5m, 15m, 1h, 4h, 1d, 1w]   # D-010, confirmed/adjusted in P6.15
+
+paths:
+  data_dir: data
+  logs_dir: logs
+
+storage:                             # D-020: SQLite hot window, then daily Parquet (zstd) cold archive
+  hot_days: {agg_trades: 2, ticks: 3, book_ticker: 2, liquidations: 30, depth: 30}
+  rollover_grace_hours: 2
+  min_free_disk_gb: 10
+  cold_archive_min_free_gb: 2        # the live writers' daily cold rollover waits below this (the hot store keeps the rows)
+
+logging:
+  level: INFO
+  max_bytes: 20971520
+  backups: 10
+  console: true
+
+supervisor:                          # `run all` (P5.1/P5.3) — docs/ops_windows.md
+  keep_awake: true                   # block idle sleep while running (lid close / power button = Windows setting)
+  manage_mt5_terminal: true          # start a missing MT5 terminal outside the supervisor's job/tree (OPS-04)
+  mt5_task: TradingSystem-MT5        # scheduled task used for that when registered (scripts/install_autostart.ps1)
+  child_log_max_bytes: 5242880       # logs/<service>.stderr.log (child stdout/stderr) rolled at (re)start above this
+  child_log_backups: 2
+
+resources:                           # SQLite page cache per store and the Vision CSV parse block (P5.2)
+  low:
+    sqlite_cache_mb: 8
+    parse_chunk_rows: 200000
+  standard:
+    sqlite_cache_mb: 16
+    parse_chunk_rows: 500000
+
+mt5:
+  data_profile: demo                 # terminal/account feeding MT5 ingestion
+  execution_profile_by_mode: {demo: demo, live: live}
+  poll_interval_ms: 100              # provisional; measured in P1.8
+  call_timeout_s: 10
+  profiles:
+    demo:
+      terminal_path: "C:/Program Files/MetaTrader 5/terminal64.exe"
+      server: WindsorBrokers1-Demo
+      account_type: demo
+      login_env: MT5_DEMO_LOGIN      # optional: empty = attach to the already logged-in terminal
+      password_env: MT5_DEMO_PASSWORD
+    live:
+      terminal_path: "C:/MT5_Live/terminal64.exe"   # separate portable terminal (plan item 7)
+      server: WindsorBrokers1-Real1
+      account_type: real
+      login_env: MT5_LIVE_LOGIN
+      password_env: MT5_LIVE_PASSWORD
+
+binance:
+  spot_rest: https://api.binance.com
+  spot_ws: wss://stream.binance.com:9443
+  usdm_rest: https://fapi.binance.com
+  usdm_ws: wss://fstream.binance.com
+  vision: https://data.binance.vision
+  api_key_env: BINANCE_API_KEY       # only needed if Binance execution is ever enabled (D-002)
+  api_secret_env: BINANCE_API_SECRET
+  rest_weight_budget_per_min: 3000
+
+# Logical pairs -> venue instruments with roles (D-008).
+# start: per datatype — ISO date (UTC), relative ("-365d"), or "earliest" (as far as the source allows).
+pairs:
+  BTCUSDT:
+    asset_class: crypto
+    decision_timeframe: 15m
+    pip_size: 1.0                    # reporting convention only
+    footprint_bucket: 10.0
+    instruments:
+      - venue: binance_spot
+        symbol: BTCUSDT
+        roles: [analysis_primary]
+        datatypes: [candles, agg_trades, book_ticker, depth]
+        start: {candles: "2017-08-17", agg_trades: "-365d"}
+      - venue: binance_usdm
+        symbol: BTCUSDT
+        roles: [flow_context]
+        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics, liquidations]
+        start: {candles: "2019-09-08", agg_trades: "-90d", funding: "2019-09-10", metrics: "-365d"}
+      - venue: mt5
+        symbol_by_profile: {demo: "BTCUSD@", live: "BTCUSD@"}   # validated against the server at startup
+        roles: [execution, quote_reference]
+        datatypes: [candles, ticks]
+        contract: {contract_size: 1, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,   # P1.5
+                   stops_level_points: 2500, swap_long: -15, swap_short: -15, swap_mode: annual_pct,
+                   triple_swap_weekday: Wed, commission_per_lot: 0}
+        start: {candles: earliest, ticks: "-90d"}
+
+  ETHUSDT:
+    asset_class: crypto
+    decision_timeframe: 15m
+    pip_size: 0.1
+    footprint_bucket: 0.5
+    instruments:
+      - venue: binance_spot
+        symbol: ETHUSDT
+        roles: [analysis_primary]
+        datatypes: [candles, agg_trades, book_ticker, depth]
+        start: {candles: "2017-08-17", agg_trades: "-365d"}
+      - venue: binance_usdm
+        symbol: ETHUSDT
+        roles: [flow_context]
+        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics, liquidations]
+        start: {candles: "2019-11-27", agg_trades: "-90d", funding: "2019-11-27", metrics: "-365d"}
+      - venue: mt5
+        symbol_by_profile: {demo: "ETHUSD@", live: "ETHUSD@"}
+        roles: [execution, quote_reference]
+        datatypes: [candles, ticks]
+        contract: {contract_size: 10, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,  # P1.5
+                   stops_level_points: 200, swap_long: -15, swap_short: -15, swap_mode: annual_pct,
+                   triple_swap_weekday: Wed, commission_per_lot: 0}
+        start: {candles: earliest, ticks: "-90d"}
+
+  XAUUSD:
+    asset_class: metal
+    decision_timeframe: 15m
+    pip_size: 0.1
+    footprint_bucket: 0.5
+    flow_proxy_approved: false       # XAUUSDT perp order flow as proxy — only after the P1.11 study approves it
+    desk:                            # D-049 / B14: gold is analysed and scored, never traded (the 1-oz minimum is 42x
+      mode: shadow                   # leverage at this account); ideas are gated in full and stored not_executed/shadow.
+      brief: desks/xau               # prompt appendix (B18). Promotion to real trades = an owner decision (H32).
+      windows:                       # entry-call windows (B15): local wall-clock, DST follows the zone
+        - {name: london, tz: Europe/London, start: "07:45", end: "11:00"}
+        - {name: new_york, tz: America/New_York, start: "08:15", end: "11:30"}
+      reopen_grace_min: 60
+      friday_cutoff: {time: "12:00", tz: America/New_York}
+    news_blackout:                   # B8 (D-046 a) with the gold tiers (D-049): the XAU engine fetches the public weekly
+      enabled: true                  # calendar hourly into data/shared/news_calendar.json; the gate refuses entries inside
+      source_url: https://nfs.faireconomy.media/ff_calendar_thisweek.json    # a window while the file is fresh; stale ->
+      refresh_minutes: 60            # no blackout + one warning (and, for this desk, no entry calls). Rollback: enabled: false
+      stale_hours: 24
+      currencies: [USD]
+      windows:                       # minutes [before, after] the release
+        fomc: [60, 75]               # FOMC statement / rate decision / press conference
+        high: [30, 30]               # every other high-impact USD release (CPI, NFP, core PCE, ...)
+        medium: [10, 10]             # PPI, retail sales, ISM, JOLTS, GDP when rated medium
+    instruments:
+      - venue: mt5
+        symbol_by_profile: {demo: "XAUUSD@", live: "XAUUSD@"}
+        roles: [analysis_primary, execution]
+        datatypes: [candles, ticks]
+        contract: {contract_size: 100, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,  # P1.5
+                   stops_level_points: 25, swap_long: -37.2, swap_short: 21.15, swap_mode: points,
+                   triple_swap_weekday: Wed, commission_per_lot: 0}
+        start: {candles: earliest, ticks: earliest}
+      - venue: binance_usdm            # real trade flow proxy for gold — used only if P1.11 approves
+        symbol: XAUUSDT
+        roles: [flow_context]
+        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics]
+        start: {candles: "2025-12-11", agg_trades: "2025-12-11", funding: "2025-12-11", metrics: "2025-12-11"}
+      # B17 intermarket context for gold: candles only (no ticks, no quotes), never a decision or gate input. The symbol
+      # names are the broker's with the '@' suffix (verify after start_all: an unknown symbol logs `context_symbol_missing`
+      # and the payload says cross unavailable - nothing else is affected). Rollback = delete these two entries + restart ingest.
+      - venue: mt5
+        symbol_by_profile: {demo: "EURUSD@", live: "EURUSD@"}     # USD proxy (~58 % of DXY, no futures roll)
+        roles: [cross_context]
+        datatypes: [candles]
+        timeframes: [15m, 1h, 4h, 1d]
+        start: {candles: "-365d"}
+      - venue: mt5
+        symbol_by_profile: {demo: "XAGUSD@", live: "XAGUSD@"}     # silver: confirmation of gold's moves
+        roles: [cross_context]
+        datatypes: [candles]
+        timeframes: [15m, 1h, 4h, 1d]
+        start: {candles: "-365d"}
+
+instances:                             # D-042: one fully independent system per pair — scripts\start.bat BTCUSDT
+  BTCUSDT: {api_port: 8766, magic_offset: 1}   # own data/instances/<PAIR>/app.db, logs/<PAIR>/, dashboard port,
+  ETHUSDT: {api_port: 8767, magic_offset: 2}   # MT5 magic (execution.magic + offset) → its own 10 %/day limit;
+  XAUUSD:  {api_port: 8768, magic_offset: 3}   # market data (data/hot, data/cold) stays shared, one file per instrument
+
+risk:                                  # D-036 (user, 2026-09-26): never lose more than 10 % in a day ($100 account)
+  risk_per_trade_pct: 1.0              # target; with $100 the 0.01-lot minimum usually sets the size
+  max_risk_per_trade_pct: 3.0          # a trade whose smallest size risks more is skipped (gold usually)
+  max_daily_loss_pct: 10.0             # also enforced as a worst case: realised + all open SL risk + new trade
+  min_rr: 1.5
+  max_open_positions: 3
+  max_effective_leverage: 10
+  sl_atr_min_mult: 0.5
+  sl_atr_max_mult: 5.0
+  max_spread_to_sl_ratio: 0.2
+  account_drawdown_stop_pct: 25        # every instance stops opening trades when the WHOLE account is 25 % below its peak
+  min_confidence: 55                   # the gate executes nothing below this (was hard-coded)
+  max_recommendation_age_s: 300
+  max_data_staleness_s: 120
+  correlated_groups: [[BTCUSDT, ETHUSDT]]
+  max_correlated_risk_pct: 4.0          # BTC+ETH together (or repeat trades on one pair)
+  allow_high_risk_display: true
+
+execution:
+  paper_equity: 100                    # paper account start (user's intended live capital, D-021)
+  mode: paper                          # paper | demo | live  (D-012)
+  trigger: manual                      # manual (dashboard button) | auto
+  venue_by_pair: {BTCUSDT: mt5, ETHUSDT: mt5, XAUUSD: mt5}   # D-002, revisited in P7.2
+  max_basis_deviation_pct: 0.15        # provisional; set from P7 measurements
+  magic: 26092501
+  live_confirmation: ""                # must equal the exact phrase in settings.py to allow live
+  management:                          # P9.6 / D-043: the executor applies the model's declared management rules
+    enabled: true
+    dry_run: false                     # true = record what would be done, touch nothing (rollback switch)
+    breakeven_buffer_spread_mult: 1.0  # breakeven stop = fill +/- this x spread (never closer than stops level + spread)
+    min_sl_change_ticks: 5             # trailing moves smaller than this are ignored
+  position_actions:                    # D-043: the model may tighten a stop, take profit, adjust a TP, cancel an order
+    enabled: true                      # (never widen/remove a stop, never add size) - false = rollback switch
+    max_per_decision: 4
+    max_per_pair_per_day: 12
+    min_minutes_between_sl_changes: 15
+
+ai:
+  active_provider: claude_code         # D-030 (override with ACTIVE_AI_PROVIDER in .env)
+  fallback_provider: gemini            # used while the active provider is unavailable (not signed in / usage limit)
+  agent_mode: agent_per_pair           # single_agent_global | agent_per_pair | agent_per_timeframe |
+                                       # agent_per_pair_and_timeframe | agent_per_pair_with_risk_reviewer |
+                                       # multi_provider_consensus
+  trigger_policy: hybrid               # every_close | on_setup_event | hybrid
+  output_language: en
+  min_minutes_between_calls: 15        # per pair
+  max_idle_minutes: 120                # hybrid: at least one review per pair every 2 h while the market is open
+  max_parallel_calls: 2
+  review_floor_minutes: 5              # next_review price/candle triggers: once per decision, >= this after the last call
+  max_backoff_minutes: 120             # spacing doubles after each failed cycle of a pair, up to this
+  cycle_deadline_s: 600                # an AI cycle is cut off after this (unfinished pairs stored as 'error')
+  skip_closed_market: true             # Phase 5: no trader call while the execution market is closed and nothing is open
+  skip_entry_calls_when_no_fit: true   # B12: no entry call while the minimum lot does not fit the risk/leverage caps (no desk)
+  transient_retry_s: 60                # OAuth refresh race / 403 "Request not allowed": one retry after this (0 = off)
+  quota_reserve_share: 0.4             # keep 40 % of daily_calls_per_pair for the busy hours below (0 = no reserve)
+  quota_reserve_hours_utc: [12, 21]    # [start, end) UTC: London afternoon + New York
+  daily_calls_per_pair: 40             # D-043: every attempt counts (first call, repair, escalation)
+  event_calls_per_day: 6               # calls woken by a fill / close / outcome, per pair and day
+  screen_timeframe: 5m                 # Python screens every 5m close; Claude only on change (new setup / condition / event)
+  screen_move_atr: 0.5                 # a time-based review needs a new setup or a move > 0.5 x ATR since the last call
+  weak_min: 2                          # weak setup reasons needed for a call
+  weak_needs_location: true            # ... and only while price is at a 15m/1h zone or liquidity (5m = confirmation only)
+  liquidity_atr: 0.3                   # "price near liquidity" = within 0.3 x ATR
+  charts:                              # D-038: candle charts sent as images with the payload
+    enabled: true                      # false = text-only calls (rollback switch)
+    width: 720
+    height: 400
+    timeframes: [1w, 1d, 4h, 1h, 15m, 5m]
+    bars: {1w: 60, 1d: 120, 4h: 120, 1h: 120, 15m: 96, 5m: 96}
+    overlays: [levels, zones, liquidity, structure, holdings, ema]
+  models:                              # D-043: per role, changeable any time (config.local.yaml); model = sonnet | opus |
+    decision: {model: null, effort: null}      # fable | a full name; null = providers.claude_code.model / effort
+    escalation: {model: opus, effort: high}    # confirms/downgrades strong setups when escalation.enabled
+    review: {model: opus, effort: high}        # Phase 4 daily/weekly review sessions
+    monitor: {model: sonnet, effort: low}      # Phase 4 diagnosis runs
+  escalation:
+    enabled: false                     # true = a strong BUY/SELL is confirmed by models.escalation before execution
+    on_strength: [strong]
+    min_confidence: 60
+    max_per_day_per_pair: 6
+    on_failure: withhold               # withhold | keep
+    timeout_s: 150
+  usage:                               # Phase 4 usage gauge: rolling token sums of every Claude call (ledger)
+    weekly_token_budget: 12000000      # calibration guesses until a week of data exists (H21)
+    five_hour_token_budget: 1500000
+    cache_read_weight: 0.1             # a cached input token counts this much
+    level1_pct: 70                     # >= : reviews and events only
+    level2_pct: 90                     # >= : events only
+    enforce: false                     # false = published only (status, health report, review pack), never rations
+  consensus_providers: []
+  budget:                              # D-004 Cost Governor
+    daily_usd_cap: 0.0                 # 0 = paid providers blocked (free tier only for now)
+    monthly_usd_cap: 0.0
+    max_ai_cost_to_profit_ratio: 0.2
+    rolling_window_days: 30
+    min_trades_for_ratio: 20
+  # Model ids and prices are re-verified against official docs in P8.2 before any paid use.
+  providers:
+    claude_code:                       # D-030: Claude on your own Claude subscription via the Claude Code CLI -
+      kind: claude_code                # no API key, no per-token bill; shares the plan's 5-hour/weekly limits
+      model: sonnet                    # alias = latest Sonnet (opus = deeper, uses the limits faster)
+      model_env: CLAUDE_CODE_MODEL
+      api_key_env: CLAUDE_CODE_OAUTH_TOKEN   # optional long-lived token (`claude setup-token`); empty = CLI login
+      effort: medium
+      free_tier: true                  # flat subscription: no marginal USD cost per call
+      structured_output: prompt        # schema in the prompt, one turn (--json-schema costs ~4-5x: D-035)
+      max_concurrency: 2               # two pairs analysed at once (set 1 on 4 GB machines)
+      rpm: 4
+      rpd: 120                         # daily cap - keeps limits free for your own interactive use
+      timeout_s: 180                  # serialized calls: keep a 3-pair batch within risk.max_recommendation_age_s
+    gemini:
+      kind: gemini
+      model: gemini-3.8-flash
+      model_env: GEMINI_MODEL
+      fallback_model: gemini-3.5-flash-lite
+      api_key_env: GOOGLE_API_KEY
+      free_tier: true                  # set false if you move to the paid tier - prices below then apply
+      rpm: 5                           # set from your AI Studio rate-limit page (H4)
+      rpd: 100
+      quota_reset_tz: America/Los_Angeles  # Google resets the daily quota at midnight Pacific time
+      effort: low                      # thinking level (low | medium | high)
+      max_output_tokens: 16384         # thinking tokens count against this budget
+      timeout_s: 90
+      model_prices:                    # paid-tier USD/MTok (ai.google.dev/gemini-api/docs/pricing, 2026-09)
+        gemini-3.8-flash: [1.50, 7.50] # upper bound of the published 3.x Flash range (conservative)
+        gemini-3.5-flash-lite: [0.30, 2.50]
+    anthropic:
+      kind: anthropic
+      model: claude-opus-5
+      model_env: ANTHROPIC_MODEL
+      fallback_model: claude-sonnet-5
+      api_key_env: ANTHROPIC_API_KEY
+      effort: high
+      max_output_tokens: 16000
+      model_prices:                    # Anthropic first-party USD/MTok
+        claude-opus-5: [5.00, 25.00]
+        claude-opus-5-5: [4.00, 20.00]
+        claude-sonnet-5: [2.00, 10.00]
+        claude-haiku-4-5: [1.00, 5.00]
+    openai:
+      kind: openai
+      model: gpt-5
+      model_env: OPENAI_MODEL
+      api_key_env: OPENAI_API_KEY
+      structured_output: native        # prices must be filled in before paid use (unknown cost -> blocked)
+    grok:
+      kind: openai_compat
+      model: grok-4
+      model_env: GROK_MODEL
+      api_key_env: XAI_API_KEY
+      base_url: https://api.x.ai/v1
+      structured_output: native
+    groq:
+      kind: openai_compat
+      model: llama-3.3-70b-versatile
+      model_env: GROQ_MODEL
+      api_key_env: GROQ_API_KEY
+      base_url: https://api.groq.com/openai/v1
+      structured_output: json_object
+      free_tier: true
+    openrouter:
+      kind: openai_compat
+      model: deepseek/deepseek-chat-v3.1:free
+      model_env: OPENROUTER_MODEL
+      api_key_env: OPENROUTER_API_KEY
+      base_url: https://openrouter.ai/api/v1
+      structured_output: prompt
+      free_tier: true
+    deepseek:
+      kind: openai_compat
+      model: deepseek-chat
+      model_env: DEEPSEEK_MODEL
+      api_key_env: DEEPSEEK_API_KEY
+      base_url: https://api.deepseek.com/v1
+      structured_output: json_object
+    ollama:                            # local fallback; weak on 4 GB RAM machines (connectivity fallback only)
+      kind: openai_compat
+      model: qwen2.5:3b
+      model_env: OLLAMA_MODEL
+      base_url: http://127.0.0.1:11434/v1
+      structured_output: json_object
+      free_tier: true
+
+api:
+  host: 127.0.0.1
+  port: 8765
+  token_env: DASHBOARD_TOKEN
+
+adaptive:                              # Phase 4 (D-039): bounded per-pair overlay in data/adaptive/<PAIR>/ (tools/tune.py)
+  enabled: true                        # false = defaults everywhere, tune.py refuses every change
+  max_expiry_days: 14
+  cooldown_days: 7                     # per key
+  max_changes_per_day: 1               # per pair
+  min_samples_strategy: 20             # resolved virtual outcomes in the window
+  min_samples_activity: 10
+  unhealthy_freeze_pct: 25             # no tuning when more of the window than this was unhealthy
+
+notify:                                # Phase 4 (D-043): log line + Windows toast + Telegram (H18: .env TELEGRAM_*)
+  enabled: true
+  toast: true
+  telegram: true                       # used only when TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set
+  min_level: info                      # info | warn | critical
+  rate_per_hour: 20                    # per process, for info and for warn each (critical: no limit)
+  dedupe_minutes: 30
+
+monitor:                               # Phase 4: tools/monitor.py every 15 min (Task Scheduler, H19), no Claude
+  stale_heartbeat_min: 15
+  order_burst_per_hour: 3              # more orders of one pair in an hour → that pair's KILL_SWITCH
+  equity_drop_warn_pct: 5              # between two runs
+  equity_drop_kill_pct: 10             # … → the global KILL_SWITCH
+  free_ram_warn_mb: 300
+  snapshot_build_warn_ms: 3000         # engine payload build time (5-min screening)
+  vpn_adapter_names: []                # e.g. ["Local Area Connection 4"] (ExpressVPN TUN)
+  diagnose_enabled: true               # a warning starts a Claude diagnosis session (at most every 3 h) …
+  diagnose_max_per_day: 2              # … and at most this many per UTC day (shared Max plan)
+  diagnose_max_gauge_level: 0          # … and none while the usage gauge is above this level
+  battery_warn_pct: 30                 # on battery below this → warn; below battery_critical_pct → critical
+  battery_critical_pct: 15
+  on_battery_warn_min: 5               # on battery longer than this → warn (the charger is out)
+  commit_warn_pct: 85                  # committed memory above this share of the commit limit → warn
+  recorder_stall_min: 30               # the P1.12 price recorder's last flush older than this → warn (0 = off)
+
+operator:                              # Phase 4: Claude review sessions from Task Scheduler (tools/operator, H19)
+  daily_max_turns: 30
+  weekly_max_turns: 40
+  diagnose_max_turns: 12
+
+backup:                                # Phase 5 A2: tools/backup_state.py (daily task + restart_all.bat); never .env
+  enabled: true
+  dir: backups                         # relative to the project root (git-ignored) or an absolute path
+  keep: 14
+
+evaluation:                            # the demo evaluation window (D-046/D-047): tools/demo_report.py, go_live_inputs.py
+  demo_start_utc: "2026-09-27T21:50:00Z"   # the Phase 4 restart (H20)
+  demo_days: 5

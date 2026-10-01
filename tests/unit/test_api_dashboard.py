@@ -11,7 +11,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import tradingsystem.api.app as app_mod
 from tradingsystem.ai.store import DecisionRecord, DecisionStore
-from tradingsystem.core.settings import PathsCfg, load_settings
+from tradingsystem.core.settings import PROJECT_ROOT, PathsCfg, load_settings
 from tradingsystem.core.timeutil import iso, now_ms
 from tradingsystem.ingest.common.appdb import AppDB
 
@@ -112,12 +112,18 @@ def test_process_scan_opens_only_python_processes(monkeypatch):
         def memory_info(self):
             return NS(rss=50 * 2**20)
 
+        def cwd(self):                  # D-051: only this project folder's processes are listed
+            return str(PROJECT_ROOT) if self.info["pid"] != 5 else r"C:\TradingSystems\OTHERPAIR"
+
+        def exe(self):
+            return r"C:\Program Files\Python312\python.exe"
+
     procs = [P(1, "System", None), P(2, "chrome.exe", ["chrome"]), P(3, "python.exe", ["python", "-m", "tradingsystem", "api"]),
-             P(4, "python.exe", ["python", "other.py"])]
+             P(4, "python.exe", ["python", "other.py"]), P(5, "python.exe", ["python", "-m", "tradingsystem", "api"])]
     monkeypatch.setattr(app_mod.psutil, "process_iter", lambda attrs: iter(procs))
     monkeypatch.setitem(app_mod._PROC_CACHE, "ts", 0)
     rows = app_mod._process_list()
-    assert opened == ["python.exe", "python.exe"] and [r["pid"] for r in rows] == [3] and rows[0]["rss_mb"] == 50
+    assert opened == ["python.exe"] * 3 and [r["pid"] for r in rows] == [3] and rows[0]["rss_mb"] == 50
     json.dumps(rows)
 
 

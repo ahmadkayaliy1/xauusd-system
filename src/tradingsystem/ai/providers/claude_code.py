@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Any
 
 from ...core.filelock import FileLock
-from ...core.settings import AIProviderCfg
+from ...core.settings import AIProviderCfg, cli_workdir
 from ...core.timeutil import now_ms
 from .base import (CHARTS_DISABLED, ImageInput, LLMProvider, LLMResult, ProviderError, image_content_blocks,
                    request_started, secret, transport_schema)
@@ -74,8 +74,8 @@ _EPOCH_RE = re.compile(r"\|(\d{10})\b")
 _REFRESH_RACE_RE = re.compile(r"another claude code process is refreshing", re.I)
 # may follow a lost race, or be a real sign-in problem: retried once, and the sign-in is re-checked in the background
 _AUTH_TRANSIENT_RE = re.compile(r"403 request not allowed|failed to refresh oauth token", re.I)
-START_STAGGER_S = 15.0           # minimum gap between two CLI starts on this machine (token refresh happens at start)
-START_STAMP = "last_start.txt"   # in the CLI work folder, shared by every system of this Windows user (D-042)
+START_STAGGER_S = 15.0           # minimum gap between two CLI starts of this system (token refresh happens at start)
+START_STAMP = "last_start.txt"   # in the CLI work folder: this project folder's own (D-051, settings.cli_workdir)
 CAPS_FILE = "cli_capabilities.json"   # in data/shared (before Phase 5 A7: the CLI work folder): the stream-json
 #                                       user-line shape this CLI accepts
 SHAPES = ("message", "content")       # documented SDK shape first; the alternate is tried once if a CLI refuses it
@@ -88,9 +88,10 @@ _INPUT_REJECT_RE = re.compile(r"streaming input|stream-json (input|message)", re
 
 
 def claim_start(workdir: Path, gap_s: float | None = None) -> float:
-    """Machine-wide spacing of CLI starts: 0.0 when this process may start a CLI now (the start is recorded), else
-    the seconds to wait. Every system on the machine (one per pair, D-042) and every sign-in check shares the work
-    folder, so two CLIs never refresh the OAuth token at the same moment."""
+    """Spacing of CLI starts: 0.0 when this process may start a CLI now (the start is recorded), else the seconds to
+    wait. Every process of this system (engine, sign-in checks, operator sessions) shares the work folder, so two of
+    its CLIs never refresh the OAuth token at the same moment. D-051: another pair's folder has its own work folder
+    (the owner chose independent systems: a rare token-refresh race between two folders is retried, ``transient_retry_s``)."""
     gap = START_STAGGER_S if gap_s is None else gap_s
     if gap <= 0:
         return 0.0
@@ -141,7 +142,7 @@ def read_capabilities(workdir: Path) -> dict[str, Any]:
 
 
 def write_capabilities(workdir: Path, doc: dict[str, Any]) -> None:
-    """Atomic replace: every system on the machine reads this file, possibly while another one writes it."""
+    """Atomic replace: every process of this system reads this file, possibly while another one writes it."""
     tmp = workdir / f"{CAPS_FILE}.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     os.replace(tmp, workdir / CAPS_FILE)
@@ -285,7 +286,7 @@ class ClaudeCodeProvider(LLMProvider):
         self.exe = find_cli(self.cfg.cli_path)
         if not self.exe:
             raise ProviderError(f"{self.name}: Claude Code CLI not found (install it or set cli_path)", retryable=False)
-        self.workdir = Path(tempfile.gettempdir()) / "tradingsystem-claude-code"
+        self.workdir = cli_workdir()            # D-051: this project folder's own (outside it, in %TEMP%)
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.caps_dir = caps_dir
         self._old_caps_read = False

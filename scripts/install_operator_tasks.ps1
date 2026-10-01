@@ -75,22 +75,54 @@ $names = @("TradingSystemOps-Monitor", "TradingSystemOps-ReviewDaily", "TradingS
     "TradingSystemOps-Backup", "TradingSystemOps-Recorder")
 # the names the spec text used first; they collide with install_autostart.ps1's per-pair pattern - removed if found
 $legacy = @("TradingSystem-Monitor", "TradingSystem-Review-Daily", "TradingSystem-Review-Weekly")
+if (-not (Test-Path $py)) { throw "Python venv not found: $py (run from this project folder)" }
+# D-051: this system's Task Scheduler folder (config supervisor.task_folder, "\" = the root folder as before) and task
+# times - every pair's project folder registers, finds and removes only the tasks in its own folder
+function Get-TaskConfig([string]$py, [string]$root) {
+    $cfg = @{}
+    Push-Location $root
+    try {
+        $lines = @(& { $ErrorActionPreference = "Continue"; & $py -m tradingsystem config --tasks })
+        $code = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($code -ne 0) { throw "could not read the task settings from config (python -m tradingsystem config --tasks)" }
+    foreach ($l in $lines) {
+        $kv = "$l" -split "=", 2
+        if ($kv.Count -eq 2) { $cfg[$kv[0].Trim()] = $kv[1].Trim() }
+    }
+    if (-not $cfg["task_folder"]) { throw "config --tasks printed no task_folder" }
+    return $cfg
+}
+function Split-TaskLine([string]$line) {
+    # one line of "schtasks /Query /FO CSV /NH": its first field is the task's full name "\Folder\Name"
+    $full = ($line -split '","')[0].Trim('"')
+    $cut = $full.LastIndexOf('\')
+    if ($cut -lt 0) { return @("\", $full) }
+    return @($full.Substring(0, $cut + 1), $full.Substring($cut + 1))
+}
+$tasks = Get-TaskConfig $py $root
+$taskFolder = $tasks["task_folder"]
+# the times: given here, else the config's (each pair's folder has its own, spaced so two folders never overlap)
+if (-not $PSBoundParameters.ContainsKey("DailyUtc")) { $DailyUtc = $tasks["daily_utc"] }
+if (-not $PSBoundParameters.ContainsKey("WeeklyUtc")) { $WeeklyUtc = $tasks["weekly_utc"] }
+if (-not $PSBoundParameters.ContainsKey("WeeklyDay")) { $WeeklyDay = $tasks["weekly_day"] }
+if (-not $PSBoundParameters.ContainsKey("BackupUtc")) { $BackupUtc = $tasks["backup_utc"] }
 
 function Test-Task([string]$name) {
     # schtasks, not Get-ScheduledTask: PowerShell 5.1 cannot read back a trigger that repeats indefinitely.
     # Local Continue: schtasks writes "cannot find" to stderr, which "Stop" would turn into a throw
     $ErrorActionPreference = "Continue"
-    schtasks /Query /TN $name 2>$null | Out-Null
+    schtasks /Query /TN "$taskFolder$name" 2>$null | Out-Null
     return ($LASTEXITCODE -eq 0)
 }
 
 function Remove-Task([string]$name) {
-    & { $ErrorActionPreference = "Continue"; schtasks /Delete /TN $name /F 2>$null | Out-Null }
-    if ($LASTEXITCODE -eq 0) { Write-Host "removed   : $name" } else { Write-Host "FAILED    : could not remove $name (exit $LASTEXITCODE)" }
+    & { $ErrorActionPreference = "Continue"; schtasks /Delete /TN "$taskFolder$name" /F 2>$null | Out-Null }
+    if ($LASTEXITCODE -eq 0) { Write-Host "removed   : $taskFolder$name" } else { Write-Host "FAILED    : could not remove $taskFolder$name (exit $LASTEXITCODE)" }
 }
 
 function Get-StartBoundary([string]$name) {
-    $xml = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN $name /XML 2>$null }
+    $xml = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN "$taskFolder$name" /XML 2>$null }
     $m = [regex]::Match(($xml -join "`n"), "<StartBoundary>([^<]+)</StartBoundary>")
     if ($m.Success) { return $m.Groups[1].Value }
     return ""
@@ -136,7 +168,7 @@ foreach ($lim in @(@{ kind = "daily"; minutes = $DailyLimitMinutes }, @{ kind = 
 }
 if ($problems.Count -and -not $DryRun) {
     foreach ($p in $problems) { Write-Host $p }
-    throw "cannot register the operator tasks (run from the checkout that has the venv: C:\the_claude_new)"
+    throw "cannot register the operator tasks (run from this project folder - it has the venv)"
 }
 $dailyAt = Get-NextUtc $DailyUtc ""
 $weeklyAt = Get-NextUtc $WeeklyUtc $WeeklyDay
@@ -146,6 +178,7 @@ $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $legacyPresent = @($legacy | Where-Object { Test-Task $_ })
 
 Write-Host "project : $root"
+Write-Host "tasks   : Task Scheduler folder $taskFolder (D-051: this system's own)"
 Write-Host "account : $user (interactive, not elevated)"
 Write-Host ("task    : {0} -> {1} `"{2}`" --quiet (every {3} min, limit {4} min)" -f $names[0], $pyw, $monitorPy, $MonitorMinutes, $MonitorLimitMinutes)
 Write-Host ("task    : {0} -> powershell -File `"{1}`" -Kind daily (daily {2} UTC, first {3}, limit {4} min)" -f $names[1], $sessionPs1, $DailyUtc, $dailyAt.ToString($fmt), $DailyLimitMinutes)
@@ -168,7 +201,7 @@ foreach ($n in $legacyPresent) { Remove-Task $n }
 # monitor: a repetition that never ends (no -RepetitionDuration = indefinitely)
 $monTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Minutes $MonitorMinutes)
 $monAction = New-ScheduledTaskAction -Execute $pyw -Argument "`"$monitorPy`" --quiet" -WorkingDirectory $root
-Register-ScheduledTask -TaskName $names[0] -Action $monAction -Trigger $monTrigger -Principal $principal `
+Register-ScheduledTask -TaskName $names[0] -TaskPath $taskFolder -Action $monAction -Trigger $monTrigger -Principal $principal `
     -Settings (New-OpsSettings $MonitorLimitMinutes) -Force `
     -Description "Trading system: pure-Python monitor every $MonitorMinutes min, no AI (docs\monitoring.md)" | Out-Null
 
@@ -177,14 +210,14 @@ $sessionArgs = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$
 $dailyTrigger = New-ScheduledTaskTrigger -Daily -At $dailyAt.ToLocalTime()
 $dailyTrigger.StartBoundary = $dailyAt.ToString($fmt)
 $dailyAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "$sessionArgs daily" -WorkingDirectory $root
-Register-ScheduledTask -TaskName $names[1] -Action $dailyAction -Trigger $dailyTrigger -Principal $principal `
+Register-ScheduledTask -TaskName $names[1] -TaskPath $taskFolder -Action $dailyAction -Trigger $dailyTrigger -Principal $principal `
     -Settings (New-OpsSettings $DailyLimitMinutes) -Force `
     -Description "Trading system: daily Claude review at $DailyUtc UTC (docs\operator_sessions.md)" | Out-Null
 
 $weeklyTrigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $WeeklyDay -At $weeklyAt.ToLocalTime()
 $weeklyTrigger.StartBoundary = $weeklyAt.ToString($fmt)
 $weeklyAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "$sessionArgs weekly" -WorkingDirectory $root
-Register-ScheduledTask -TaskName $names[2] -Action $weeklyAction -Trigger $weeklyTrigger -Principal $principal `
+Register-ScheduledTask -TaskName $names[2] -TaskPath $taskFolder -Action $weeklyAction -Trigger $weeklyTrigger -Principal $principal `
     -Settings (New-OpsSettings $WeeklyLimitMinutes) -Force `
     -Description "Trading system: weekly Claude review, $WeeklyDay $WeeklyUtc UTC (docs\operator_sessions.md)" | Out-Null
 
@@ -192,22 +225,22 @@ Register-ScheduledTask -TaskName $names[2] -Action $weeklyAction -Trigger $weekl
 $backupTrigger = New-ScheduledTaskTrigger -Daily -At $backupAt.ToLocalTime()
 $backupTrigger.StartBoundary = $backupAt.ToString($fmt)
 $backupAction = New-ScheduledTaskAction -Execute $pyw -Argument "`"$backupPy`" --quiet" -WorkingDirectory $root
-Register-ScheduledTask -TaskName $names[3] -Action $backupAction -Trigger $backupTrigger -Principal $principal `
+Register-ScheduledTask -TaskName $names[3] -TaskPath $taskFolder -Action $backupAction -Trigger $backupTrigger -Principal $principal `
     -Settings (New-OpsSettings $BackupLimitMinutes) -Force `
     -Description "Trading system: state backup at $BackupUtc UTC, never .env (docs\ops_windows.md section 9)" | Out-Null
 
 # recorder keep-alive: a repetition that never ends, like the monitor
 $recTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(3) -RepetitionInterval (New-TimeSpan -Minutes $RecorderMinutes)
 $recAction = New-ScheduledTaskAction -Execute $pyw -Argument "`"$recorderPy`" --quiet" -WorkingDirectory $root
-Register-ScheduledTask -TaskName $names[4] -Action $recAction -Trigger $recTrigger -Principal $principal `
+Register-ScheduledTask -TaskName $names[4] -TaskPath $taskFolder -Action $recAction -Trigger $recTrigger -Principal $principal `
     -Settings (New-OpsSettings $RecorderLimitMinutes) -Force `
     -Description "Trading system: P1.12 price recorder keep-alive every $RecorderMinutes min (docs\ops_windows.md section 9)" | Out-Null
 
 # ---------------------------------------------------------------- verify (schtasks, not Get-ScheduledTask)
 $bad = 0
 foreach ($name in $names) {
-    $q = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN $name /FO LIST 2>$null } | Select-String "Status|Next Run"
-    Write-Host ("registered: {0}  {1}" -f $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
+    $q = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN "$taskFolder$name" /FO LIST 2>$null } | Select-String "Status|Next Run"
+    Write-Host ("registered: {0}{1}  {2}" -f $taskFolder, $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
 }
 foreach ($name in $names[1], $names[2], $names[3]) {
     $sb = Get-StartBoundary $name

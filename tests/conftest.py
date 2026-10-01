@@ -17,6 +17,18 @@ FIXTURES = ROOT / "tests" / "fixtures" / "real"
 if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))
 
+# D-051: every pair is its own project folder whose config/config.yaml names that one pair. The unit suite tests the
+# code (the same in every folder) against the three-pair config it was written for: tests/fixtures/config_three_pairs.yaml
+# - in this process (DEFAULT_CONFIG) and in the tools it starts (TRADINGSYSTEM_CONFIG) - and never reads the folder's
+# config.local.yaml. The folder's real config is checked by test_split_pairs.py (THIS_FOLDER_CONFIG).
+THREE_PAIRS_CONFIG = ROOT / "tests" / "fixtures" / "config_three_pairs.yaml"
+THIS_FOLDER_CONFIG = ROOT / "config" / "config.yaml"
+from tradingsystem.core import settings as _settings  # noqa: E402
+
+_settings.DEFAULT_CONFIG = THREE_PAIRS_CONFIG
+_settings.LOCAL_CONFIG = ROOT / "tests" / "fixtures" / "no_config.local.yaml"      # never exists
+os.environ["TRADINGSYSTEM_CONFIG"] = str(THREE_PAIRS_CONFIG)
+
 
 def no_desk(s):
     """The settings with every pair's desk removed. config.yaml puts XAUUSD in shadow (D-049 / B14: never traded), so

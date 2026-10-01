@@ -66,7 +66,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from tradingsystem.core.filelock import FileLock  # noqa: E402
 from tradingsystem.core.logsetup import setup_logging  # noqa: E402
-from tradingsystem.core.settings import INSTANCE_ENV, Settings, load_settings  # noqa: E402
+from tradingsystem.core.settings import INSTANCE_ENV, Settings, cli_workdir, load_settings  # noqa: E402
 from tradingsystem.core.timeutil import iso, now_ms  # noqa: E402
 from tradingsystem.supervisor import control, procs, winops  # noqa: E402
 
@@ -86,7 +86,7 @@ LOCAL_CONFIG_ARC = "config/config.local.yaml"
 CAPS_ARC = "external/cli_capabilities.json"
 CAPS_NEW_ARC = "data/shared/cli_capabilities.json"
 # the CLI capability file before Phase 5 A7 (ai/providers/claude_code.py: the CLI work folder in %TEMP%)
-CLI_CAPS_OLD = Path(tempfile.gettempdir()) / "tradingsystem-claude-code" / "cli_capabilities.json"
+CLI_CAPS_OLD = cli_workdir() / "cli_capabilities.json"     # D-051: this project folder's CLI work folder
 REPORTED_TABLES = ("ai_decisions", "ai_usage")
 DB_SIDE = ("-wal", "-shm", "-journal")
 ARC_PREFIXES = ("data/", "external/")

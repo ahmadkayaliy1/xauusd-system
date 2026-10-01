@@ -65,6 +65,31 @@ $pyw = Join-Path $root ".venv\Scripts\pythonw.exe"
 foreach ($exe in $py, $pyw) {
     if (-not (Test-Path $exe)) { throw "Python venv not found: $exe" }
 }
+# D-051: this system's Task Scheduler folder (config supervisor.task_folder, "\" = the root folder as before) and task
+# times - every pair's project folder registers, finds and removes only the tasks in its own folder
+function Get-TaskConfig([string]$py, [string]$root) {
+    $cfg = @{}
+    Push-Location $root
+    try {
+        $lines = @(& { $ErrorActionPreference = "Continue"; & $py -m tradingsystem config --tasks })
+        $code = $LASTEXITCODE
+    } finally { Pop-Location }
+    if ($code -ne 0) { throw "could not read the task settings from config (python -m tradingsystem config --tasks)" }
+    foreach ($l in $lines) {
+        $kv = "$l" -split "=", 2
+        if ($kv.Count -eq 2) { $cfg[$kv[0].Trim()] = $kv[1].Trim() }
+    }
+    if (-not $cfg["task_folder"]) { throw "config --tasks printed no task_folder" }
+    return $cfg
+}
+function Split-TaskLine([string]$line) {
+    # one line of "schtasks /Query /FO CSV /NH": its first field is the task's full name "\Folder\Name"
+    $full = ($line -split '","')[0].Trim('"')
+    $cut = $full.LastIndexOf('\')
+    if ($cut -lt 0) { return @("\", $full) }
+    return @($full.Substring(0, $cut + 1), $full.Substring($cut + 1))
+}
+$taskFolder = (Get-TaskConfig $py $root)["task_folder"]
 if (-not $NoMT5Task -and -not $TerminalPath) {
     Push-Location $root
     try {
@@ -83,7 +108,8 @@ function Get-TsTasks {
     $ErrorActionPreference = "Continue"
     $names = @()
     foreach ($line in (schtasks /Query /FO CSV /NH 2>$null)) {
-        $n = ($line -split '","')[0].Trim('"').TrimStart('\')
+        $folder, $n = Split-TaskLine $line
+        if ($folder -ne $taskFolder) { continue }          # D-051: another folder = another pair's system
         if ($n -eq "TradingSystem" -or ($n -like "TradingSystem-*" -and $n -ne "TradingSystem-MT5")) { $names += $n }
     }
     return $names | Sort-Object -Unique
@@ -155,6 +181,7 @@ $remove = if ($perPair) {
 }
 
 Write-Host "project : $root"
+Write-Host "tasks   : Task Scheduler folder $taskFolder (D-051: this system's own)"
 Write-Host "account : $user (interactive, not elevated)"
 if (-not $NoMT5Task) { Write-Host "task    : TradingSystem-MT5 -> $TerminalPath (at logon, no time limit)" }
 foreach ($k in $keepAlive) {
@@ -165,12 +192,12 @@ foreach ($n in $remove) { Write-Host "remove  : $n (the other kind of system - t
 if ($DryRun) { Write-Host "DryRun: nothing registered."; exit 0 }
 
 if (-not $NoMT5Task) {
-    Register-ScheduledTask -TaskName "TradingSystem-MT5" -Action $mt5Action -Trigger $mt5Trigger `
+    Register-ScheduledTask -TaskName "TradingSystem-MT5" -TaskPath $taskFolder -Action $mt5Action -Trigger $mt5Trigger `
         -Principal $principal -Settings $mt5Settings -Force `
         -Description "Trading system: MetaTrader 5 terminal at logon, outside every trading-system process (docs\ops_windows.md)" | Out-Null
 }
 foreach ($n in $remove) {
-    & { $ErrorActionPreference = "Continue"; schtasks /Delete /TN $n /F 2>$null | Out-Null }
+    & { $ErrorActionPreference = "Continue"; schtasks /Delete /TN "$taskFolder$n" /F 2>$null | Out-Null }
     if ($LASTEXITCODE -eq 0) { Write-Host "removed   : $n" } else { Write-Host "FAILED    : could not remove $n (exit $LASTEXITCODE)" }
 }
 foreach ($k in $keepAlive) {
@@ -180,7 +207,7 @@ foreach ($k in $keepAlive) {
         -RepetitionInterval (New-TimeSpan -Minutes $KeepAliveMinutes)          # no duration = indefinitely
     $action = New-ScheduledTaskAction -Execute $pyw -Argument $k[1] -WorkingDirectory $root
     $stop = if ($perPair) { "scripts\stop.bat $($k[0].Substring(14))" } else { "scripts\stop.bat" }
-    Register-ScheduledTask -TaskName $k[0] -Action $action -Trigger @($logon, $every) `
+    Register-ScheduledTask -TaskName $k[0] -TaskPath $taskFolder -Action $action -Trigger @($logon, $every) `
         -Principal $principal -Settings $tsSettings -Force `
         -Description "Trading system: start/keep the supervisor running; paused by $stop (docs\ops_windows.md)" | Out-Null
 }
@@ -189,8 +216,8 @@ foreach ($k in $keepAlive) {
 # (0x80041318 "incorrectly formatted or out of range") although the task is valid and runs
 foreach ($name in @("TradingSystem-MT5") + @($keepAlive | ForEach-Object { $_[0] })) {
     if ($NoMT5Task -and $name -eq "TradingSystem-MT5") { continue }
-    $q = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN $name /FO LIST 2>$null } | Select-String "Status|Next Run"
-    Write-Host ("registered: {0}  {1}" -f $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
+    $q = & { $ErrorActionPreference = "Continue"; schtasks /Query /TN "$taskFolder$name" /FO LIST 2>$null } | Select-String "Status|Next Run"
+    Write-Host ("registered: {0}{1}  {2}" -f $taskFolder, $name, (($q | ForEach-Object { $_.Line.Trim() }) -join " | "))
 }
 if ($perPair) {
     Write-Host "Done. The keep-alive starts each pair's system within $KeepAliveMinutes min unless you stopped it"

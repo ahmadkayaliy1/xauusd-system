@@ -1,6 +1,7 @@
 """P1.12 — Price-matching recorder (research grade, runs for days).
 
-Records, with local UTC receive timestamps:
+Records, with local UTC receive timestamps (D-051: the pairs of THIS project folder - ``recorded_symbols``; the
+three pairs of one folder are the P1.12 set below):
   * Binance spot  bookTicker: BTCUSDT, ETHUSDT                (price changes only)
   * Binance USDⓈ-M bookTicker: BTCUSDT, ETHUSDT, XAUUSDT       (price changes only, + E/T times)
   * MT5 ticks (bid/ask, server-time ``time_msc``): BTCUSD@, ETHUSD@, XAUUSD@
@@ -37,10 +38,32 @@ from tradingsystem.core.settings import PROJECT_ROOT
 from tradingsystem.core.timeutil import iso, now_ms
 
 OUT = PROJECT_ROOT / "data" / "research" / "price_matching"
-SPOT_WS = "wss://stream.binance.com:9443/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker"
-USDM_WS = "wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/xauusdt@bookTicker"
+SPOT_WS = "wss://stream.binance.com:9443/stream?streams="
+USDM_WS = "wss://fstream.binance.com/stream?streams="
 MT5_PATH = r"C:/Program Files/MetaTrader 5/terminal64.exe"
-MT5_SYMBOLS = ["BTCUSD@", "ETHUSD@", "XAUUSD@"]
+
+
+def recorded_symbols(settings=None) -> dict[str, list[str]]:  # noqa: ANN001
+    """D-051: what this project folder records - its pairs (config ``instances:``, else every enabled pair), per pair
+    its Binance spot and USD-M instruments (bookTicker) and its MT5 execution symbol (ticks); ``cross_context``
+    instruments are not recorded. With the three pairs in one folder this is the P1.12 set."""
+    from tradingsystem.core.instruments import _resolve_symbol
+    from tradingsystem.core.settings import load_settings
+    s = settings if settings is not None else load_settings()
+    out: dict[str, list[str]] = {"spot_book": [], "usdm_book": [], "mt5_ticks": []}
+    for name in list(s.instances) or list(s.enabled_pairs()):
+        for icfg in s.pairs[name].instruments:
+            if icfg.venue == "binance_spot":
+                out["spot_book"].append(icfg.symbol.lower())
+            elif icfg.venue == "binance_usdm":
+                out["usdm_book"].append(icfg.symbol.lower())
+            elif icfg.venue == "mt5" and "execution" in icfg.roles:
+                out["mt5_ticks"].append(_resolve_symbol(icfg, s.mt5.data_profile))
+    return out
+
+
+def stream_url(base: str, symbols: list[str]) -> str:
+    return base + "/".join(f"{sym}@bookTicker" for sym in symbols)
 
 log = logging.getLogger("recorder")
 
@@ -133,7 +156,7 @@ async def binance_stream(name: str, url: str, buf: Buffers, stop: asyncio.Event)
             backoff = min(backoff * 2, 60)
 
 
-def mt5_poller(q: mp.Queue, stop, interval_s: float) -> None:
+def mt5_poller(q: mp.Queue, stop, interval_s: float, symbols: list[str]) -> None:
     """Runs in its own process: MT5 calls hold the GIL, a slow terminal must not stall the WS loop."""
     import MetaTrader5 as mt5
 
@@ -151,14 +174,14 @@ def mt5_poller(q: mp.Queue, stop, interval_s: float) -> None:
                     raise RuntimeError("MT5 terminal not running (or started < 30 s ago) - not launching it")
                 if not mt5.initialize(path=MT5_PATH):
                     raise RuntimeError(f"initialize failed: {mt5.last_error()}")
-                for s in MT5_SYMBOLS:
+                for s in symbols:
                     mt5.symbol_select(s, True)
                 connected = True
                 acc = mt5.account_info()
                 log.info("mt5 connected server=%s", acc.server if acc else None)
                 q.put(("events", {"recv_ms": now_ms(), "symbol": "mt5", "event": "connect",
                                    "detail": acc.server if acc else ""}))
-            for s in MT5_SYMBOLS:
+            for s in symbols:
                 if s not in state:
                     tick = mt5.symbol_info_tick(s)
                     if tick is None:
@@ -254,7 +277,10 @@ async def main_async(args: argparse.Namespace) -> None:
     started = now_ms()
     mq: mp.Queue = mp.Queue()
     mstop = mp.Event()
-    procs = [mp.Process(target=mt5_poller, args=(mq, mstop, args.mt5_interval_ms / 1000), daemon=True)]
+    syms = recorded_symbols()
+    log.info("recording %s", syms)
+    procs = [mp.Process(target=mt5_poller, args=(mq, mstop, args.mt5_interval_ms / 1000, syms["mt5_ticks"]),
+                        daemon=True)]
     procs[0].start()
 
     def ensure_mt5() -> None:
@@ -263,7 +289,8 @@ async def main_async(args: argparse.Namespace) -> None:
         log.warning("MT5 poller process exited (code %s) — restarting it", procs[-1].exitcode)
         buf.add("events", {"recv_ms": now_ms(), "symbol": "mt5", "event": "poller_restart",
                            "detail": f"exit code {procs[-1].exitcode}"})
-        procs.append(mp.Process(target=mt5_poller, args=(mq, mstop, args.mt5_interval_ms / 1000), daemon=True))
+        procs.append(mp.Process(target=mt5_poller, args=(mq, mstop, args.mt5_interval_ms / 1000, syms["mt5_ticks"]),
+                                daemon=True))
         procs[-1].start()
 
     def drain() -> None:
@@ -275,11 +302,9 @@ async def main_async(args: argparse.Namespace) -> None:
 
     th = threading.Thread(target=drain, daemon=True)
     th.start()
-    tasks = [
-        asyncio.create_task(binance_stream("spot_book", SPOT_WS, buf, stop)),
-        asyncio.create_task(binance_stream("usdm_book", USDM_WS, buf, stop)),
-        asyncio.create_task(clock_sampler(buf, stop)),
-    ]
+    tasks = [asyncio.create_task(binance_stream(name, stream_url(base, syms[name]), buf, stop))
+             for name, base in (("spot_book", SPOT_WS), ("usdm_book", USDM_WS)) if syms[name]]
+    tasks.append(asyncio.create_task(clock_sampler(buf, stop)))
     try:
         await flusher(buf, stop, args.flush_s, started, ensure_mt5)
     finally:

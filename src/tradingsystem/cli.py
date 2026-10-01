@@ -61,6 +61,11 @@ def _cmd_config(args: argparse.Namespace) -> int:
     if args.instances:                      # scripts/*_all.bat: one configured pair per line, nothing else
         print("\n".join(settings.instances))
         return 0
+    if args.tasks:                          # D-051: scripts/*.ps1 - this system's Task Scheduler folder and times
+        sv, op = settings.supervisor, settings.operator
+        print(f"task_folder={sv.task_folder}\nmt5_task={sv.mt5_task}\ndaily_utc={op.daily_utc}\n"
+              f"weekly_utc={op.weekly_utc}\nweekly_day={op.weekly_day}\nbackup_utc={settings.backup.daily_utc}")
+        return 0
     print(f"config OK  hash={settings.config_hash}  profile={settings.profile}")
     print(f"AI: provider={settings.ai.active_provider} model={settings.provider_model(settings.ai.active_provider)} "
           f"mode={settings.ai.agent_mode} trigger={settings.ai.trigger_policy}")
@@ -123,6 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
     cf = sub.add_parser("config", help="validate and summarise the configuration")
     cf.add_argument("--config", help="path to an alternative config.yaml")
     cf.add_argument("--instances", action="store_true", help="list the pairs configured as independent systems")
+    cf.add_argument("--tasks", action="store_true",
+                    help="key=value lines: this system's Task Scheduler folder, MT5 task and task times (D-051)")
     cf.set_defaults(func=_cmd_config)
 
     st = sub.add_parser("status", help="validate PROJECT_STATUS.md structure")

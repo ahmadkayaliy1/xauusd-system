@@ -13,7 +13,8 @@ start by hand goes through the same checks and never makes a second recorder. Ea
    would start the terminal as its own child through ``mt5.initialize(path)``, and our processes never start MT5
    (docs/ops_windows.md §5) — the ``TradingSystem-MT5`` task or a supervisor does.
 3. A recorder runs → nothing (never two recorders). Alive = a process whose command line runs
-   ``research/price_matching/recorder.py`` (any checkout, relative or absolute path). ``status.json`` alone cannot
+   ``research/price_matching/recorder.py`` (relative or absolute path) and that belongs to THIS project folder (its
+   working folder or executable lies in it - D-051: every pair's folder runs its own recorder). ``status.json`` alone cannot
    tell: a new recorder writes it only at its first flush (300 s), so the pid in it is checked first and then every
    python process. A live recorder whose last flush is older than 15 min is logged as a warning, not replaced: it
    is hung, and a hung recorder never reads STOP (it checks the file only after a completed flush) — the advice is
@@ -89,15 +90,16 @@ def is_recorder_cmd(cmd: list[str]) -> bool:
 
 
 def recorder_pids(status_pid: int | None = None) -> list[int]:
-    """Running recorders (any checkout), the status file's pid first. A venv's python.exe/pythonw.exe is a launcher
-    that runs the real interpreter as its child with the same command line: both count (one recorder)."""
+    """Running recorders of THIS project folder (D-051: another pair's folder runs its own), the status file's pid
+    first. A venv's python.exe/pythonw.exe is a launcher that runs the real interpreter as its child with the same
+    command line: both count (one recorder)."""
     found: list[int] = []
     if status_pid:
         try:
             p = psutil.Process(int(status_pid))
             if (p.name() or "").lower().startswith("python"):
                 try:
-                    if is_recorder_cmd(p.cmdline()):
+                    if is_recorder_cmd(p.cmdline()) and procs.in_project(p, ROOT):
                         return [p.pid]
                 except psutil.AccessDenied:
                     return [p.pid]          # a python process we may not inspect: assume it is the recorder
@@ -108,7 +110,7 @@ def recorder_pids(status_pid: int | None = None) -> list[int]:
         if p.pid == me or not (p.info.get("name") or "").lower().startswith("python"):
             continue
         try:
-            if is_recorder_cmd(p.cmdline()):
+            if is_recorder_cmd(p.cmdline()) and procs.in_project(p, ROOT):
                 found.append(p.pid)
         except (psutil.Error, OSError):
             continue

@@ -8,7 +8,7 @@ writer each); tables keep the spec's names (``xauusd_candles_1m`` ...).
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .settings import InstrumentCfg, Settings
@@ -115,6 +115,37 @@ class InstrumentRegistry:
 
     def pairs(self) -> list[str]:
         return sorted({i.pair for i in self._all})
+
+
+def sibling_feeds(settings: Settings) -> list[Instrument]:
+    """D-051: the candles of a correlated-group sibling that no system of this project folder records.
+
+    A pair's ``market.cross`` block (Phase 5 B6) reads the analysis-primary candles of the other members of its
+    ``risk.correlated_groups`` group (BTC <-> ETH) from ``data/hot/<venue>/<SYMBOL>.db``. While the sibling runs from
+    this folder (enabled here, or one of its ``instances:``) its own ingest writes that file. When it does not —
+    every pair is its own project folder — this system records the sibling's candles itself, into its own data
+    folder: candles only, the sibling's own timeframes and start. Nothing of the sibling is analysed, gated or traded
+    here (the feed is never part of the trading registry; only the ingest records it)."""
+    enabled = settings.enabled_pairs()
+    out: dict[str, Instrument] = {}
+    for group in settings.risk.correlated_groups:
+        if not any(p in enabled for p in group):
+            continue
+        for other in group:
+            if other in enabled or other in settings.instances or other not in settings.pairs:
+                continue
+            pcfg = settings.pairs[other]
+            only = settings.model_copy(update={"pairs": {other: pcfg.model_copy(update={"enabled": True})}})
+            try:
+                inst = InstrumentRegistry.from_settings(only).primary(other)
+            except (ValueError, IndexError):
+                continue
+            if "candles" not in inst.datatypes:
+                continue
+            feed = replace(inst, datatypes=("candles",),
+                           start_specs={k: v for k, v in inst.start_specs.items() if k == "candles"})
+            out.setdefault(feed.key, feed)
+    return list(out.values())
 
 
 def _resolve_symbol(icfg: InstrumentCfg, mt5_profile: str) -> str:

@@ -117,11 +117,18 @@ def test_cmd_instance_and_scopes(monkeypatch):
 
 
 class FakeProc:
-    def __init__(self, pid, ppid, cmd):
+    def __init__(self, pid, ppid, cmd, cwd=None):
         self.pid, self.info, self._cmd = pid, {"name": "python.exe", "ppid": ppid}, cmd
+        self._cwd = str(procs.PROJECT_ROOT) if cwd is None else cwd     # D-051: only this folder's supervisors count
 
     def cmdline(self):
         return self._cmd
+
+    def cwd(self):
+        return self._cwd
+
+    def exe(self):
+        return r"C:\Program Files\Python312\python.exe"
 
     def ppid(self):                     # read per supervisor match since Phase 5 (not prefetched for every process)
         return self.info["ppid"]
