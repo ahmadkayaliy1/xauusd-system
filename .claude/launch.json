@@ -3,9 +3,8 @@
   "configurations": [
     {
       "name": "dashboard",
-      "runtimeExecutable": "C:/the_claude_new/.venv/Scripts/python.exe",
-      "runtimeArgs": ["-m", "tradingsystem", "api"],
-      "port": 8765
+      "url": "http://127.0.0.1:8768",
+      "port": 8768
     }
   ]
 }

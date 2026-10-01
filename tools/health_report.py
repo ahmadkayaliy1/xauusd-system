@@ -523,6 +523,11 @@ def system_report(s: Settings, hours: float, now: float) -> list[str]:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):       # a cp1252 console cannot print every line ("→", "≥" in details)
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--hours", type=float, default=6)
     ap.add_argument("--instance", help="only this pair's system")

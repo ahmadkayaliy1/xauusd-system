@@ -751,7 +751,8 @@ def test_help_exits_0(env):
 def test_the_script_runs_on_the_config_named_by_tradingsystem_config(tmp_path):
     """The operator session runs it as a script: its own src on sys.path, TRADINGSYSTEM_CONFIG honoured (the scratch
     live run), UTF-8 output, exit codes from main()."""
-    raw = yaml.safe_load((ROOT / "config" / "config.yaml").read_text(encoding="utf-8"))
+    # D-051: the three-pair config the suite runs against (a pair folder's config/config.yaml names only its pair)
+    raw = yaml.safe_load((ROOT / "tests" / "fixtures" / "config_three_pairs.yaml").read_text(encoding="utf-8"))
     raw.setdefault("paths", {})["data_dir"] = str(tmp_path / "data")
     raw["paths"]["logs_dir"] = str(tmp_path / "logs")
     cfg = tmp_path / "cfg.yaml"

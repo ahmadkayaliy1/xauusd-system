@@ -24,10 +24,16 @@ if str(ROOT / "src") not in sys.path:
 THREE_PAIRS_CONFIG = ROOT / "tests" / "fixtures" / "config_three_pairs.yaml"
 THIS_FOLDER_CONFIG = ROOT / "config" / "config.yaml"
 from tradingsystem.core import settings as _settings  # noqa: E402
+from tradingsystem.ai.providers import base as _provider_base  # noqa: E402
 
 _settings.DEFAULT_CONFIG = THREE_PAIRS_CONFIG
 _settings.LOCAL_CONFIG = ROOT / "tests" / "fixtures" / "no_config.local.yaml"      # never exists
 os.environ["TRADINGSYSTEM_CONFIG"] = str(THREE_PAIRS_CONFIG)
+# ... nor the folder's .env (imported at the switch, H33): a load_settings() without env_path would copy its
+# EXECUTION_MODE / EXECUTION_TRIGGER / keys into os.environ for every later test (test_default_config_is_valid saw
+# 'demo'); the providers' secret() and the notifier re-read it through base.ENV_FILE.
+_settings.DEFAULT_ENV = ROOT / "tests" / "fixtures" / "no.env"                     # never exists
+_provider_base.ENV_FILE = _settings.DEFAULT_ENV
 
 
 def no_desk(s):

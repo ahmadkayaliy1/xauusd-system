@@ -417,6 +417,11 @@ def _in_running_checkout(out: Path) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):       # --print on a cp1252 console raised UnicodeEncodeError ("—", "→")
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--pair", default="XAUUSD")
     ap.add_argument("--root")

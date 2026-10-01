@@ -42,6 +42,14 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-10-01 — this folder's first check (XAUUSD only) and its start.** A read-only check found the folder sound
+  (repo, venv, one-pair config, data: 0 gaps over 120 h, every SQLite file `integrity_check ok`) and H26b applied
+  in the old checkout on 2026-09-30 ≈ 08:47 UTC (the tracker had not said so). The owner deleted the old
+  `\TradingSystemOps-*` tasks (they still ran the archive's monitor and Opus daily review) and started this system
+  at 08:02 UTC. Fixed: two split-only test failures (the real `.env` leaking into the suite; a test reading the
+  one-pair config), UTF-8 output of `desk_report` / `health_report`, `.claude/launch.json`. Open for the owner:
+  H34 (this folder's tasks), H35 (remote + backup). PROJECT_STATUS P12.5 notes 15–20.
+
 * **2026-10-01 — one folder per pair (D-051).** The owner asked for the three pairs as three fully independent
   systems, "no folder linked to another in any way" and "no change to any detail or idea". Built on
   `feat/split-pairs` (worktree `C:\the_claude_new_wt\split`) and cloned into `C:\TradingSystems\XAUUSD`,
