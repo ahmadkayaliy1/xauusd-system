@@ -1,4 +1,6 @@
 # Automated Trading System — main configuration (no secrets here; secrets go in .env).
+# D-051: THIS folder is the XAUUSD system only — its own code, data, logs, tasks and settings; it shares
+# no file with the other pairs' folders (C:\TradingSystems\<PAIR>).
 # Local overrides: config/config.local.yaml (git-ignored, deep-merged over this file).
 # One-line switches via .env: ACTIVE_AI_PROVIDER, AGENT_MODE, TRIGGER_POLICY,
 # EXECUTION_MODE, EXECUTION_TRIGGER, RESOURCE_PROFILE, <PROVIDER>_MODEL.
@@ -27,6 +29,7 @@ supervisor:                          # `run all` (P5.1/P5.3) — docs/ops_window
   keep_awake: true                   # block idle sleep while running (lid close / power button = Windows setting)
   manage_mt5_terminal: true          # start a missing MT5 terminal outside the supervisor's job/tree (OPS-04)
   mt5_task: TradingSystem-MT5        # scheduled task used for that when registered (scripts/install_autostart.ps1)
+  task_folder: '\TradingSystems\XAUUSD\'   # D-051: this system's own Task Scheduler folder (every task of it)
   child_log_max_bytes: 5242880       # logs/<service>.stderr.log (child stdout/stderr) rolled at (re)start above this
   child_log_backups: 2
 
@@ -65,61 +68,11 @@ binance:
   vision: https://data.binance.vision
   api_key_env: BINANCE_API_KEY       # only needed if Binance execution is ever enabled (D-002)
   api_secret_env: BINANCE_API_SECRET
-  rest_weight_budget_per_min: 3000
+  rest_weight_budget_per_min: 1000   # D-051: was 3000 shared out by the three systems (one IP) = 1000 each
 
 # Logical pairs -> venue instruments with roles (D-008).
 # start: per datatype — ISO date (UTC), relative ("-365d"), or "earliest" (as far as the source allows).
 pairs:
-  BTCUSDT:
-    asset_class: crypto
-    decision_timeframe: 15m
-    pip_size: 1.0                    # reporting convention only
-    footprint_bucket: 10.0
-    instruments:
-      - venue: binance_spot
-        symbol: BTCUSDT
-        roles: [analysis_primary]
-        datatypes: [candles, agg_trades, book_ticker, depth]
-        start: {candles: "2017-08-17", agg_trades: "-365d"}
-      - venue: binance_usdm
-        symbol: BTCUSDT
-        roles: [flow_context]
-        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics, liquidations]
-        start: {candles: "2019-09-08", agg_trades: "-90d", funding: "2019-09-10", metrics: "-365d"}
-      - venue: mt5
-        symbol_by_profile: {demo: "BTCUSD@", live: "BTCUSD@"}   # validated against the server at startup
-        roles: [execution, quote_reference]
-        datatypes: [candles, ticks]
-        contract: {contract_size: 1, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,   # P1.5
-                   stops_level_points: 2500, swap_long: -15, swap_short: -15, swap_mode: annual_pct,
-                   triple_swap_weekday: Wed, commission_per_lot: 0}
-        start: {candles: earliest, ticks: "-90d"}
-
-  ETHUSDT:
-    asset_class: crypto
-    decision_timeframe: 15m
-    pip_size: 0.1
-    footprint_bucket: 0.5
-    instruments:
-      - venue: binance_spot
-        symbol: ETHUSDT
-        roles: [analysis_primary]
-        datatypes: [candles, agg_trades, book_ticker, depth]
-        start: {candles: "2017-08-17", agg_trades: "-365d"}
-      - venue: binance_usdm
-        symbol: ETHUSDT
-        roles: [flow_context]
-        datatypes: [candles, agg_trades, mark_price, funding, open_interest, metrics, liquidations]
-        start: {candles: "2019-11-27", agg_trades: "-90d", funding: "2019-11-27", metrics: "-365d"}
-      - venue: mt5
-        symbol_by_profile: {demo: "ETHUSD@", live: "ETHUSD@"}
-        roles: [execution, quote_reference]
-        datatypes: [candles, ticks]
-        contract: {contract_size: 10, volume_min: 0.01, volume_step: 0.01, tick_size: 0.01,  # P1.5
-                   stops_level_points: 200, swap_long: -15, swap_short: -15, swap_mode: annual_pct,
-                   triple_swap_weekday: Wed, commission_per_lot: 0}
-        start: {candles: earliest, ticks: "-90d"}
-
   XAUUSD:
     asset_class: metal
     decision_timeframe: 15m
@@ -174,10 +127,9 @@ pairs:
         timeframes: [15m, 1h, 4h, 1d]
         start: {candles: "-365d"}
 
-instances:                             # D-042: one fully independent system per pair — scripts\start.bat BTCUSDT
-  BTCUSDT: {api_port: 8766, magic_offset: 1}   # own data/instances/<PAIR>/app.db, logs/<PAIR>/, dashboard port,
-  ETHUSDT: {api_port: 8767, magic_offset: 2}   # MT5 magic (execution.magic + offset) → its own 10 %/day limit;
-  XAUUSD:  {api_port: 8768, magic_offset: 3}   # market data (data/hot, data/cold) stays shared, one file per instrument
+instances:                             # D-042/D-051: this folder's one system — scripts\start_all.bat (or start.bat XAUUSD)
+  XAUUSD: {api_port: 8768, magic_offset: 3}   # own data/instances/XAUUSD/app.db, logs/XAUUSD/, dashboard port, MT5 magic
+                                       # (execution.magic + offset, as before the split → the same open trades are its own)
 
 risk:                                  # D-036 (user, 2026-09-26): never lose more than 10 % in a day ($100 account)
   risk_per_trade_pct: 1.0              # target; with $100 the 0.01-lot minimum usually sets the size
@@ -189,19 +141,20 @@ risk:                                  # D-036 (user, 2026-09-26): never lose mo
   sl_atr_min_mult: 0.5
   sl_atr_max_mult: 5.0
   max_spread_to_sl_ratio: 0.2
-  account_drawdown_stop_pct: 25        # every instance stops opening trades when the WHOLE account is 25 % below its peak
+  account_drawdown_stop_pct: 25        # stops opening trades when the account's equity is 25 % below its peak (D-051: this
+                                       # folder keeps its own peak file; the equity is read from the broker)
   min_confidence: 55                   # the gate executes nothing below this (was hard-coded)
   max_recommendation_age_s: 300
   max_data_staleness_s: 120
-  correlated_groups: [[BTCUSDT, ETHUSDT]]
-  max_correlated_risk_pct: 4.0          # BTC+ETH together (or repeat trades on one pair)
+  correlated_groups: []                # D-051: gold has no sibling (kept apart from the crypto pairs)
+  max_correlated_risk_pct: 4.0          # repeat trades on this pair
   allow_high_risk_display: true
 
 execution:
   paper_equity: 100                    # paper account start (user's intended live capital, D-021)
   mode: paper                          # paper | demo | live  (D-012)
   trigger: manual                      # manual (dashboard button) | auto
-  venue_by_pair: {BTCUSDT: mt5, ETHUSDT: mt5, XAUUSD: mt5}   # D-002, revisited in P7.2
+  venue_by_pair: {XAUUSD: mt5}          # D-002, revisited in P7.2
   max_basis_deviation_pct: 0.15        # provisional; set from P7 measurements
   magic: 26092501
   live_confirmation: ""                # must equal the exact phrase in settings.py to allow live
@@ -405,11 +358,15 @@ operator:                              # Phase 4: Claude review sessions from Ta
   daily_max_turns: 30
   weekly_max_turns: 40
   diagnose_max_turns: 12
+  daily_utc: "04:30"                 # D-051: the review tasks' times (UTC) - spaced from the other pairs' folders
+  weekly_utc: "06:00"                # so two Claude sessions never run at once on this laptop
+  weekly_day: Sunday
 
 backup:                                # Phase 5 A2: tools/backup_state.py (daily task + restart_all.bat); never .env
   enabled: true
   dir: backups                         # relative to the project root (git-ignored) or an absolute path
   keep: 14
+  daily_utc: "03:30"                 # D-051: the backup task's time (UTC)
 
 evaluation:                            # the demo evaluation window (D-046/D-047): tools/demo_report.py, go_live_inputs.py
   demo_start_utc: "2026-09-27T21:50:00Z"   # the Phase 4 restart (H20)

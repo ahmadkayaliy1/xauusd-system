@@ -1,4 +1,4 @@
-# Agent guide
+# Agent guide - the XAUUSD system (C:\TradingSystems\XAUUSD, D-051)
 
 - **Read `PROJECT_STATUS.md` first.** It is the phase tracker (spec §10): overview, human actions pending,
   decision log, and every phase with its exact next step. Update it the moment a phase changes state;
