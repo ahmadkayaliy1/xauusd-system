@@ -26,6 +26,11 @@ FOLDER = ROOT / "config" / "config.yaml"
 NO_LOCAL = ROOT / "tests" / "fixtures" / "no_config.local.yaml"
 NO_ENV = ROOT / "tests" / "fixtures" / "no.env"
 SIBLING = {"BTCUSDT": "ETHUSDT", "ETHUSDT": "BTCUSDT", "XAUUSD": None}
+# D-052 (owner, 2026-10-01): the XAUUSD folder's gold trades on the demo account - what may differ from the three-pair
+# config there, and the exact values
+D052_RISK = {"max_risk_per_trade_pct": 15.0, "max_daily_loss_pct": 30.0, "max_effective_leverage": 60.0,
+             "account_drawdown_stop_pct": 100.0, "max_correlated_risk_pct": 30.0}
+D052_MONITOR = {"equity_drop_warn_pct": 15.0, "equity_drop_kill_pct": 35.0, "daily_loss_warn_margin_pct": 5.0}
 
 
 def three(inst: str | None = None):
@@ -229,16 +234,29 @@ def test_this_folders_config_is_one_pair_and_otherwise_the_three_pair_config_unc
     assert [f.key for f in sibling_feeds(new)] == ([f"binance_spot:{sib}"] if sib else [])
     assert new.risk.correlated_groups == (old.risk.correlated_groups if sib else [])
 
-    def view(s):
+    def view(s, d052=False):
         d = s.model_dump(mode="json")
         for k in ("config_hash", "instances", "supervisor", "operator", "backup"):
             d.pop(k)
         d["risk"].pop("correlated_groups")
         d["execution"].pop("venue_by_pair")
         d["pairs"] = d["pairs"][pair]
+        if d052:                     # the owner's later decision for this folder, checked value by value below
+            for k in D052_RISK:
+                d["risk"].pop(k)
+            for k in D052_MONITOR:
+                d["monitor"].pop(k)
+            d["pairs"].pop("desk")
         return d
 
-    assert view(new) == view(old)
+    d052 = pair == "XAUUSD" and new.pairs[pair].desk is not None and new.pairs[pair].desk.mode == "live"
+    assert view(new, d052) == view(old, d052)
+    if d052:
+        assert {k: getattr(new.risk, k) for k in D052_RISK} == D052_RISK
+        assert {k: getattr(new.monitor, k) for k in D052_MONITOR} == D052_MONITOR
+        desk = new.pairs[pair].desk
+        assert (desk.brief, desk.windows, desk.friday_cutoff.time, desk.flat_before_weekend.time,
+                desk.pre_news_review_min) == ("desks/xau_live", [], "15:00", "16:30", 15)
     times = {"XAUUSD": ("04:30", "06:00", "03:30"), "BTCUSDT": ("04:55", "06:45", "03:40"),
              "ETHUSDT": ("05:20", "07:30", "03:50")}[pair]
     assert (new.operator.daily_utc, new.operator.weekly_utc, new.backup.daily_utc) == times

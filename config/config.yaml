@@ -79,14 +79,14 @@ pairs:
     pip_size: 0.1
     footprint_bucket: 0.5
     flow_proxy_approved: false       # XAUUSDT perp order flow as proxy — only after the P1.11 study approves it
-    desk:                            # D-049 / B14: gold is analysed and scored, never traded (the 1-oz minimum is 42x
-      mode: shadow                   # leverage at this account); ideas are gated in full and stored not_executed/shadow.
-      brief: desks/xau               # prompt appendix (B18). Promotion to real trades = an owner decision (H32).
-      windows:                       # entry-call windows (B15): local wall-clock, DST follows the zone
-        - {name: london, tz: Europe/London, start: "07:45", end: "11:00"}
-        - {name: new_york, tz: America/New_York, start: "08:15", end: "11:30"}
-      reopen_grace_min: 60
-      friday_cutoff: {time: "12:00", tz: America/New_York}
+    desk:                            # D-052 (owner, 2026-10-01): gold TRADES on the demo account through the full gate
+      mode: live                     # (was shadow, D-049). Rollback: mode: shadow, brief: desks/xau, the two windows
+      brief: desks/xau_live          # (london 07:45-11:00 Europe/London, new_york 08:15-11:30 America/New_York),
+      windows: []                    # friday_cutoff 12:00, no flat_before_weekend - then restart_all.bat.
+      reopen_grace_min: 60           # [] = entry calls all day, Asia included (the model reads the session)
+      friday_cutoff: {time: "15:00", tz: America/New_York}            # no new entry after it on Friday
+      flat_before_weekend: {time: "16:30", tz: America/New_York}      # every open trade closed, orders cancelled
+      pre_news_review_min: 15        # a review call this long before a fomc/high release while a trade is open
     news_blackout:                   # B8 (D-046 a) with the gold tiers (D-049): the XAU engine fetches the public weekly
       enabled: true                  # calendar hourly into data/shared/news_calendar.json; the gate refuses entries inside
       source_url: https://nfs.faireconomy.media/ff_calendar_thisweek.json    # a window while the file is fresh; stale ->
@@ -131,23 +131,23 @@ instances:                             # D-042/D-051: this folder's one system �
   XAUUSD: {api_port: 8768, magic_offset: 3}   # own data/instances/XAUUSD/app.db, logs/XAUUSD/, dashboard port, MT5 magic
                                        # (execution.magic + offset, as before the split → the same open trades are its own)
 
-risk:                                  # D-036 (user, 2026-09-26): never lose more than 10 % in a day ($100 account)
-  risk_per_trade_pct: 1.0              # target; with $100 the 0.01-lot minimum usually sets the size
-  max_risk_per_trade_pct: 3.0          # a trade whose smallest size risks more is skipped (gold usually)
-  max_daily_loss_pct: 10.0             # also enforced as a worst case: realised + all open SL risk + new trade
+risk:                                  # D-052 (owner, 2026-10-01, the DEMO account, gold alone): the 1-oz minimum sets the
+                                       # size; were D-036: 3 % / 10 % / 10x / drawdown stop 25 % / correlated 4 %
+  risk_per_trade_pct: 1.0              # target; at this account the 0.01-lot (1 oz) minimum sets the size
+  max_risk_per_trade_pct: 15.0         # a trade whose 1 oz risks more (a stop wider than ~15 % of equity) is refused
+  max_daily_loss_pct: 30.0             # also enforced as a worst case: realised + all open SL risk + new trade
   min_rr: 1.5
   max_open_positions: 3
-  max_effective_leverage: 10
+  max_effective_leverage: 60           # 1 oz ≈ $4,200: 39x at $107, 56x at $75 - below ~$70 equity gold is refused
   sl_atr_min_mult: 0.5
   sl_atr_max_mult: 5.0
   max_spread_to_sl_ratio: 0.2
-  account_drawdown_stop_pct: 25        # stops opening trades when the account's equity is 25 % below its peak (D-051: this
-                                       # folder keeps its own peak file; the equity is read from the broker)
+  account_drawdown_stop_pct: 100       # off (D-052): only the daily limit stops trading (100 = equity at zero)
   min_confidence: 55                   # the gate executes nothing below this (was hard-coded)
   max_recommendation_age_s: 300
   max_data_staleness_s: 120
   correlated_groups: []                # D-051: gold has no sibling (kept apart from the crypto pairs)
-  max_correlated_risk_pct: 4.0          # repeat trades on this pair
+  max_correlated_risk_pct: 30.0        # repeat trades on this pair (D-052: = the daily limit; was 4)
   allow_high_risk_display: true
 
 execution:
@@ -340,8 +340,9 @@ notify:                                # Phase 4 (D-043): log line + Windows toa
 monitor:                               # Phase 4: tools/monitor.py every 15 min (Task Scheduler, H19), no Claude
   stale_heartbeat_min: 15
   order_burst_per_hour: 3              # more orders of one pair in an hour → that pair's KILL_SWITCH
-  equity_drop_warn_pct: 5              # between two runs
-  equity_drop_kill_pct: 10             # … → the global KILL_SWITCH
+  equity_drop_warn_pct: 15             # between two runs (D-052: one gold loss may take 15 %; was 5)
+  equity_drop_kill_pct: 35             # … → the global KILL_SWITCH (D-052: above two full losses; was 10)
+  daily_loss_warn_margin_pct: 5        # warn at -(risk.max_daily_loss_pct - this) = -25 % (D-052)
   free_ram_warn_mb: 300
   snapshot_build_warn_ms: 3000         # engine payload build time (5-min screening)
   vpn_adapter_names: []                # e.g. ["Local Area Connection 4"] (ExpressVPN TUN)

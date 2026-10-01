@@ -1304,8 +1304,13 @@ def _render(d: dict[str, Any], n_ideas: int, n_health: int, n_rows: int) -> str:
                 + (f" reverted {x['reverted']}" if x["reverted"] else "") for x in tc[:n_rows]))
         p(f"pair kill switch: {_switch(r.get('kill_switch') or {})}")
         if r.get("desk"):
-            p(f"desk: {{mode: {r['desk']['mode']}}} (D-049: ideas gated and scored, never sent; entry calls only in "
-              f"the windows {', '.join(r['desk']['windows'])})")
+            wins = ", ".join(r["desk"]["windows"]) or "all day"
+            if r["desk"]["mode"] == "live":
+                p(f"desk: {{mode: live}} (D-052: trades on the demo account through the full gate; entry calls: "
+                  f"{wins})")
+            else:
+                p(f"desk: {{mode: {r['desk']['mode']}}} (D-049: ideas gated and scored, never sent; entry calls only "
+                  f"in the windows {wins})")
         lv = r.get("last_valid") or {}
         if lv.get("operator_notes"):
             p(f"last operator_notes ({lv.get('notes_ts')}): {lv['operator_notes']}")

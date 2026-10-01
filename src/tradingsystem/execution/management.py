@@ -42,7 +42,9 @@ log = logging.getLogger(__name__)
 
 EPS = 1e-9
 ACTIONS = ("move_sl_to_breakeven", "partial_close", "trail_atr", "trail_structure", "close_all")
-TRIGGERS = ("tp_hit", "price_reached", "r_multiple", "minutes_elapsed", "candle_close")
+# "at_time" is the system's own trigger (value = a UTC ms instant, met from then on, by a position or a pending order):
+# the live desk's weekend flat (D-052). The model's contract does not offer it.
+TRIGGERS = ("tp_hit", "price_reached", "r_multiple", "minutes_elapsed", "candle_close", "at_time")
 TRAILING = ("trail_atr", "trail_structure")
 LIVE = ("position", "order")
 FINAL = ("applied", "rejected", "skipped")          # a row in one of these states is never applied again
@@ -250,6 +252,8 @@ def _trigger(rule: dict, leg: Leg, legs: list[Leg], ven: Callable[[Leg], Venue],
     if val is None:
         return ""
     val = float(val)
+    if trig == "at_time":
+        return (rule.get("note") or f"at {val:.0f}") if ctx.now_ms >= val else ""
     if trig == "tp_hit":
         k = int(val)
         return f"TP{k} hit" if any(x.kind == "closed" and x.closed_reason == "tp" and x.tp_index == k

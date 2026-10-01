@@ -225,22 +225,31 @@ def _default_desk_windows() -> list[DeskWindowCfg]:
 
 
 class DeskCfg(_Model):
-    """A desk (D-049): a pair that is analysed and scored but never traded. ``mode: shadow`` is the only mode — the
-    executor gates every valid BUY/SELL of the pair in full for the record and stores it ``not_executed``/``shadow``
-    (scored in R by the virtual outcomes); it never places, modifies or cancels an order for the pair. A real
-    ("live") mode is a future owner decision (H32) and does not exist. Code default of ``PairCfg.desk`` is None =
-    the pair trades as before."""
-    mode: Literal["shadow"] = "shadow"
+    """A desk (D-049): a metal pair with its own brief, call windows and news rules. ``mode: shadow`` — analysed and
+    scored but never traded: the executor gates every valid BUY/SELL of the pair in full for the record and stores it
+    ``not_executed``/``shadow`` (scored in R by the virtual outcomes); it never places, modifies or cancels an order
+    for the pair. ``mode: live`` (D-052, the owner's decision for the demo account) — the desk trades through the
+    ordinary execution path: the full risk gate (no waived check), position management and the model's actions, plus
+    the desk's own duties (a review call before a fomc/high release and before the weekend flat, and the weekend flat
+    itself). ``windows: []`` = entry calls whenever the market is open (the model reads the session from the payload).
+    Code default of ``PairCfg.desk`` is None = the pair trades as before."""
+    mode: Literal["shadow", "live"] = "shadow"
     brief: str = Field("", pattern=r"^(desks/[a-z0-9_]+)?$")   # prompt appendix under ai/prompts: "desks/xau" (B18)
-    windows: list[DeskWindowCfg] = Field(default_factory=_default_desk_windows)          # entry-call windows (B15)
+    windows: list[DeskWindowCfg] = Field(default_factory=_default_desk_windows)   # entry-call windows (B15); [] = all day
     reopen_grace_min: int = Field(60, ge=0, le=600)     # no entry call this long after the Sunday reopen (B15)
     friday_cutoff: DeskClockCfg = DeskClockCfg(time="12:00", tz="America/New_York")     # none after it on Friday (B15)
+    # D-052, live mode only: every open trade of the pair is closed (pending orders cancelled) from this Friday time on,
+    # before the weekend gap; a review call comes WEEKEND_REVIEW_MIN earlier. None = held over the weekend.
+    flat_before_weekend: DeskClockCfg | None = None
+    pre_news_review_min: int = Field(15, ge=0, le=120)  # live: a review call this long before a fomc/high release (0 = off)
 
     @model_validator(mode="after")
     def _check(self) -> "DeskCfg":
         names = [w.name for w in self.windows]
         if len(set(names)) != len(names):
             raise ValueError("desk.windows: duplicate window names")
+        if self.flat_before_weekend is not None and self.mode != "live":
+            raise ValueError("desk.flat_before_weekend applies to a live desk only (a shadow desk holds nothing)")
         return self
 
 

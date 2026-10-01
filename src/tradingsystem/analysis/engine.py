@@ -68,7 +68,8 @@ EVENT_COALESCE_MS = 60_000  # executor events are gathered this long before they
 ENTRY_KINDS = ("strong", "weak", "idle", "close")   # trigger strengths that are entry calls (B12 / B15)
 # executor events that wake the model (Phase 3): a placement, a fill, a closed position, a settled outcome, and the
 # result of its own position_actions
-WAKE_EVENTS = ("order", "mgmt_filled", "mgmt_position_closed", "outcome", "action_applied", "action_rejected")
+WAKE_EVENTS = ("order", "mgmt_filled", "mgmt_position_closed", "outcome", "action_applied", "action_rejected",
+               "desk_review")      # D-052: a live desk's review before a fomc/high release / the weekend flat
 EVENT_CURSOR_KEY = "executor_event_id"   # engine_kv: the last executor event handed to a pair (survives restarts)
 EVENT_MAX_AGE_MS = 2 * 3_600_000          # … but an event older than this at start-up no longer wakes the model
 ANSWERED = ("valid", "invalid", "refused")   # the model answered: the setup and events it was called for are seen
@@ -404,14 +405,16 @@ class Engine:
         market, so the window / fit coming back does not fire on old structure) and one ``skipped: <reason>`` event
         is recorded per hour (no fit) or per gap between windows (desk). A pair holding a position or a pending order
         keeps its review and event calls (only entry triggers wait); a pair whose holdings are unknown is never
-        held back by B12 (a desk pair holds nothing by design, so unknown counts as nothing there). Never raises."""
+        held back by B12 (a shadow desk holds nothing by design, so unknown counts as nothing there; a live desk,
+        D-052, may hold a trade, so unknown is not held back either). Never raises."""
         try:
             hold, why, key = self._entry_suppression(pair, now, cal, payload)
             if not hold:
                 self._held_back.pop(pair, None)
                 return False
             held = self._holds(pair)
-            if held is None and self.s.pairs[pair].desk is None:
+            desk = self.s.pairs[pair].desk
+            if held is None and (desk is None or desk.mode != "shadow"):
                 return False
             if held and strength not in ENTRY_KINDS:
                 return False

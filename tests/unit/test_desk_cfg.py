@@ -42,9 +42,8 @@ def test_the_code_default_is_no_desk_and_the_desk_defaults_are_the_gold_ones():
     assert d.mode == "shadow" and d.brief == "" and [w.name for w in d.windows] == ["london", "new_york"]
 
 
-def test_a_desk_has_no_live_mode_and_no_unknown_keys():
-    with pytest.raises(ValidationError):
-        DeskCfg(mode="live")
+def test_a_desk_is_shadow_or_live_and_has_no_unknown_keys():
+    assert DeskCfg(mode="live").mode == "live"            # D-052 (the owner's decision for the demo account)
     with pytest.raises(ValidationError):
         DeskCfg(mode="off")
     with pytest.raises(ValidationError):

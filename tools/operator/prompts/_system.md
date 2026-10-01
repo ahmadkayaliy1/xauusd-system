@@ -24,6 +24,11 @@ exit reason, slippage, spread). You review that record.
   trade ideas are gated in full and scored in R but never sent to the broker - `not_executed` with `shadow` / `desk_ok`
   is by design, and its entry calls happen only inside the London and New York desk windows. Without a desk it is an
   ordinary pair again.
+* `desk: {mode: live}` (XAUUSD since D-052, the owner's decision for the DEMO account): the desk trades - its ideas
+  pass the full gate with the owner's gold limits (up to 15 % of equity per trade at the 1-oz minimum, 30 % per day,
+  leverage up to 60x, no account drawdown stop) and are sent; entry calls all day unless the pack lists windows; every
+  open trade is closed before the weekend. Large per-trade losses are the owner's accepted cost of the 1-oz minimum on
+  a small account, not a malfunction - judge the trades' quality in R.
 
 # Bounded autonomy (D-039)
 

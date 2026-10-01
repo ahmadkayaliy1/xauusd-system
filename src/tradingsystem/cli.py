@@ -70,6 +70,11 @@ def _cmd_config(args: argparse.Namespace) -> int:
     print(f"AI: provider={settings.ai.active_provider} model={settings.provider_model(settings.ai.active_provider)} "
           f"mode={settings.ai.agent_mode} trigger={settings.ai.trigger_policy}")
     print(f"execution: mode={settings.execution.mode} trigger={settings.execution.trigger}")
+    r = settings.risk
+    print(f"risk: per trade <= {r.max_risk_per_trade_pct:g}% (target {r.risk_per_trade_pct:g}%) day <= "
+          f"{r.max_daily_loss_pct:g}% leverage <= {r.max_effective_leverage:g}x open <= {r.max_open_positions} "
+          "account drawdown stop "
+          + ("off" if r.account_drawdown_stop_pct >= 100 else f"{r.account_drawdown_stop_pct:g}%"))
     a, x = settings.ai, settings.execution          # Phase 3 switches: what is really in force after the merges
     print(f"phase 3: charts={'on' if a.charts.enabled else 'OFF'} escalation={'on' if a.escalation.enabled else 'off'} "
           f"({a.models.escalation.model}/{a.models.escalation.effort}) management="
@@ -80,6 +85,12 @@ def _cmd_config(args: argparse.Namespace) -> int:
     reg = InstrumentRegistry.from_settings(settings)
     for pair in reg.pairs():
         print(f"  {pair}:")
+        desk = settings.pairs[pair].desk
+        if desk is not None:
+            fb = desk.flat_before_weekend
+            print(f"    desk: mode={desk.mode} entry calls={','.join(w.name for w in desk.windows) or 'all day'} "
+                  f"friday_cutoff={desk.friday_cutoff.time} {desk.friday_cutoff.tz} "
+                  f"flat_before_weekend={f'{fb.time} {fb.tz}' if fb else 'off'}")
         for inst in reg.for_pair(pair):
             print(f"    {inst.key:<24} roles={','.join(inst.roles):<32} data={','.join(inst.datatypes)}")
     return 0

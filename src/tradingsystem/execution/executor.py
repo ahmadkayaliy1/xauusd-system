@@ -45,9 +45,11 @@ from ..storage.tablespec import spec_for
 from .action_gate import ActionContext
 from .action_gate import evaluate as gate_action
 from .backends.paper import PaperBackend, Tick
-from .desk import SHADOW_KEY, ShadowGuard, ShadowViolation, assert_not_shadow, shadow_pairs
+from .desk import (REVIEW_EVENT, SHADOW_KEY, ShadowGuard, ShadowViolation, assert_not_shadow, live_desk_pairs,
+                   reviews_due, shadow_pairs, with_weekend_flat)
 from .drawdown import AccountPeak
 from .exposure import live_sides
+from ..analysis.desk_windows import weekend_flat_ms
 from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
 from .metrics import VIRTUAL_HORIZON_MS, MetricsJob, mt5_outcome_detail, paper_outcome_detail, virtual_valid_until
 from ..core.tunables import Tunables
@@ -773,7 +775,7 @@ class Executor:
             self.advance_paper()
         self.process_candidates()
         # protective work runs even when a kill switch is on (it only ever reduces risk)
-        for step in (self.process_actions, self.manage_positions):
+        for step in (self.process_actions, self.manage_positions, self.desk_reviews):
             try:
                 step()
             except Exception as exc:  # noqa: BLE001 — never blocks the candidates or the heartbeat
@@ -976,12 +978,35 @@ class Executor:
                  "execution_detail": json.loads(r[3]) if r[3] else {}} for r in rows if r[1] in enabled]
 
     def manage_positions(self) -> None:
-        """P9.6: apply every open trade's declared management rules (breakeven, trailing, partials, time stop)."""
+        """P9.6: apply every open trade's declared management rules (breakeven, trailing, partials, time stop); a live
+        desk's trades also get the weekend flat from ``desk.flat_before_weekend`` on (D-052)."""
         decisions = self._open_decisions()
         for d in decisions:
             assert_not_shadow(self.shadow_pairs, d["pair"], "position management")
         if decisions:
-            self.manager.manage(decisions, now_ms())
+            now = now_ms()
+            self.manager.manage([self._with_desk_rules(d, now) for d in decisions], now)
+
+    def _with_desk_rules(self, d: dict, now: int) -> dict:
+        pcfg = self.s.pairs.get(d["pair"])
+        desk = pcfg.desk if pcfg is not None else None
+        flat = weekend_flat_ms(desk, now) if desk is not None else None
+        return with_weekend_flat(d, flat) if flat is not None else d
+
+    def desk_reviews(self) -> None:
+        """D-052: a live desk that holds a trade asks the model for a review before a fomc/high release and before the
+        weekend flat — one ``desk_review`` event per occasion (the engine wakes the model on it; an event call)."""
+        live = live_desk_pairs(self.s) & set(self.s.enabled_pairs())
+        if not live:
+            return
+        now = now_ms()
+        for pair in sorted(live & {d["pair"] for d in self._open_decisions()}):
+            for kind, key, text in reviews_due(self.s.pairs[pair], self.s.paths.shared(), now):
+                kv = f"{pair}:desk_review:{kind}"
+                if self.store.kv_get(kv) == key:
+                    continue
+                self.store.kv_set(kv, key)
+                self._emit(REVIEW_EVENT, {"pair": pair, "kind": kind, "text": text})
 
     def _action_status(self, source_decision: str, seq: int, target: str, leg: str) -> str | None:
         return self._action_row(source_decision, seq, target, leg)[0]

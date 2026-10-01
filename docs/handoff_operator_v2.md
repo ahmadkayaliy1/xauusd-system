@@ -42,6 +42,15 @@ The user speaks Arabic (Levantine) — reply to them in Arabic; code, docs and c
 
 ## 0b. Progress log (newest first — read this before §4)
 
+* **2026-10-01 — D-052: gold trades on the demo account (P12.6, plan docs/plans/gold_live_and_backtest.md).** The
+  owner chose to let the desk trade now, alone, with gold limits of its own (15 % per trade at the 1-oz minimum, 30 %
+  per day, leverage ≤ 60x, no account drawdown stop, entry calls all day with session rules in the new brief
+  `desks/xau_live`, flat before the weekend, 60 calls/day). Built on `feat/gold-live-demo` (worktree
+  `C:\TradingSystems\XAUUSD_wt\gold-live`): `desk.mode: live` takes the ordinary execution path (the shadow path is
+  untouched, so the rollback is the config), the weekend flat is a system `close_all` rule (internal `at_time`
+  trigger) and the review calls before a fomc/high release / the flat are `desk_review` executor events. Apply = H36.
+  Next: plan phase B, the tick-level backtest (P12.7).
+
 * **2026-10-01 — this folder's first check (XAUUSD only) and its start.** A read-only check found the folder sound
   (repo, venv, one-pair config, data: 0 gaps over 120 h, every SQLite file `integrity_check ok`) and H26b applied
   in the old checkout on 2026-09-30 ≈ 08:47 UTC (the tracker had not said so). The owner deleted the old
