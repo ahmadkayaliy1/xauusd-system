@@ -199,3 +199,19 @@ def test_the_run_writes_the_weeks_real_calendar_as_fetched_at_the_clock(tmp_path
     bt._news_sync()
     st = news.state_now(s.pairs["XAUUSD"].news_blackout, s.paths.shared(), bt.clock)
     assert st.fresh and st.blocked and "PCE" in st.blackout[1].title
+
+
+def test_a_management_variant_changes_only_what_it_names():
+    from tradingsystem.backtest.runner import variant
+    rec = {"decision": "SELL", "entry": {"price": 4150.0}, "stop_loss": 4160.0,
+           "take_profits": [{"price": 4115.0, "close_fraction": 1.0}],
+           "management": [{"action": "move_sl_to_breakeven", "trigger": "r_multiple", "value": 1.0},
+                          {"action": "trail_atr", "trigger": "tp_hit", "value": 1, "params": {"atr_mult": 1.5}},
+                          {"action": "close_all", "trigger": "minutes_elapsed", "value": 240}]}
+    v = variant(rec, {"be_r": 1.5})
+    assert v["management"][0]["value"] == 1.5 and rec["management"][0]["value"] == 1.0      # a copy
+    assert [x["action"] for x in variant(rec, {"be_r": 0})["management"]] == ["trail_atr", "close_all"]
+    t = variant(rec, {"tp_r": 2})
+    assert t["take_profits"] == [{"price": 4130.0, "close_fraction": 1.0, "label": "2R (backtest variant)"}]
+    assert [x["trigger"] for x in t["management"]] == ["r_multiple", "minutes_elapsed"]  # no rule on a TP that left
+    assert variant({"decision": "NO_TRADE"}, {"tp_r": 2}) == {"decision": "NO_TRADE"}

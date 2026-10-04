@@ -43,6 +43,7 @@ log = logging.getLogger("backtest")
 STEP_MS = 5_000                      # clock step while a position / order is live
 HOUSEKEEPING_MS = 60_000             # virtual outcomes + metrics, as the live executor (every minute)
 SCREEN_SETTLE_MS = 6_000             # the engine screens this long after a 5-minute close (its SETTLE_MS is 5 s)
+DUE_KEY = "bt:due:"                  # engine_kv: when a run's answer reached its executor (replay uses it exactly)
 PROVIDER_WAIT_S = 120                # real seconds to wait for the provider's sign-in check before the clock starts
 
 
@@ -58,6 +59,7 @@ class RunConfig:
     news: bool = False                       # the news blackout: the archived real calendar of each week (B5)
     news_archive: Path | None = None         # <data>/shared/news_archive (news.ARCHIVE_DIR): <NY Sunday>.json
     brief: str | None = None                 # another desk brief for the run (an A/B of the prompt), e.g. desks/xau_live_b
+    mgmt: dict = field(default_factory=dict)  # replay only: a management variant of the stored answers (variant())
     ai: dict = field(default_factory=lambda: {"daily_calls_per_pair": 60, "min_minutes_between_calls": 15,
                                               "review_floor_minutes": 10, "event_calls_per_day": 12})
     step_ms: int = STEP_MS
@@ -75,6 +77,35 @@ def missing_news_weeks(archive: Path, start_ms: int, end_ms: int) -> list[str]:
     """The New York weeks of [start, end) without an archived calendar (a run with ``news`` refuses them)."""
     weeks = sorted({ny_week(t) for t in range(start_ms, end_ms, 6 * 3_600_000)} | {ny_week(end_ms - 1)})
     return [w for w in weeks if not (Path(archive) / f"{w}.json").is_file()]
+
+
+def variant(rec: dict, mgmt: dict) -> dict:
+    """A management variant of a stored answer (``replay`` / ``production`` runs only - the same decisions, another
+    way to manage them): ``be_r`` 0 drops the model's breakeven rules, x moves them to x R (trigger r_multiple);
+    ``tp_r`` x replaces the targets by one at x R from the answer's own entry (a MARKET answer without an entry price
+    keeps its targets). The model's later answers still saw the original path - an approximation, said in the report."""
+    import copy
+    r = copy.deepcopy(rec)
+    if r.get("decision") not in ("BUY", "SELL"):
+        return r
+    be = mgmt.get("be_r")
+    if be is not None:
+        rules = []
+        for x in r.get("management") or []:
+            if x.get("action") == "move_sl_to_breakeven":
+                if not be:
+                    continue
+                x = {**x, "trigger": "r_multiple", "value": float(be)}
+            rules.append(x)
+        r["management"] = rules
+    tp_r = mgmt.get("tp_r")
+    entry = (r.get("entry") or {}).get("price")
+    if tp_r and entry is not None and r.get("stop_loss") is not None:
+        d = abs(float(entry) - float(r["stop_loss"]))
+        tp = float(entry) + (tp_r * d if r["decision"] == "BUY" else -tp_r * d)
+        r["take_profits"] = [{"price": round(tp, 2), "close_fraction": 1.0, "label": f"{tp_r:g}R (backtest variant)"}]
+        r["management"] = [x for x in r.get("management") or [] if x.get("trigger") != "tp_hit"]
+    return r
 
 
 def answer_due(row_ts: int, rec: dict, latency_ms: int) -> int:
@@ -132,6 +163,11 @@ class Backtest:
         src = Path(self.rc.source)
         con = sqlite3.connect(f"file:{src.as_posix()}?mode=ro", uri=True)
         try:
+            try:                      # an earlier run's own record of when each answer reached its executor (exact)
+                due_of = {k[len(DUE_KEY):]: int(json.loads(v)) for k, v in
+                          con.execute("SELECT key, value FROM engine_kv WHERE key LIKE ?", (DUE_KEY + "%",))}
+            except sqlite3.OperationalError:
+                due_of = {}
             rows = con.execute(
                 "SELECT id, ts, trigger, recommendation, raw_text, latency_ms, input_tokens, output_tokens, "
                 "trigger_strength, session, regime, htf_bias, provider, model FROM ai_decisions WHERE pair=? AND "
@@ -142,12 +178,14 @@ class Backtest:
             r = json.loads(rec) if rec else None
             if not r:
                 continue
+            if self.rc.mgmt:
+                r = variant(r, self.rc.mgmt)
             dr = DecisionRecord(self.rc.pair, "agent_per_pair", (trig or "")[:600], "valid", provider=prov, model=model,
                                 recommendation=r, raw_text=raw, latency_ms=int(lat or 0), input_tokens=int(tin or 0),
                                 output_tokens=int(tout or 0), trigger_strength=strength, session=sess, regime=regime,
                                 htf_bias=bias, actions_state="pending" if r.get("position_actions") else None,
                                 id=did, ts=int(ts))
-            self.inject.append((answer_due(int(ts), r, int(lat or 0)), dr))
+            self.inject.append((due_of.get(did) or answer_due(int(ts), r, int(lat or 0)), dr))
         self.inject.sort(key=lambda x: x[0])
 
     # ------------------------------------------------------------------ the loop
@@ -264,6 +302,10 @@ class Backtest:
         await asyncio.gather(*tasks, return_exceptions=True)
         latency_ms = int((time.time() - t0) * 1000)
         self.calls = self._ledger_calls()
+        with self.ex.store._lock:
+            ids = [r[0] for r in self.ex.store._con.execute("SELECT id FROM ai_decisions WHERE ts=?", (as_of,))]
+        for did in ids:
+            self.ex.store.kv_set(f"{DUE_KEY}{did}", as_of + latency_ms)   # when this answer reached the executor
         log.info("call(s) at %s answered after %.0f s (calls so far %d)", iso(as_of), latency_ms / 1000, self.calls)
         end = as_of + latency_ms
         while self.clock < end:                         # the answer is on its way: the market moves on

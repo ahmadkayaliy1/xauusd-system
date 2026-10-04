@@ -78,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="news blackout on, from the archived real calendars (data/shared/news_archive/<NY Sunday>.json)")
     ap.add_argument("--run-id")
     ap.add_argument("--brief", help="another desk brief for this run (prompt A/B), e.g. desks/xau_live_b")
+    ap.add_argument("--mgmt", default="", help="replay/production: a management variant, e.g. be_r=1.5,tp_r=2 (be_r=0: "
+                                               "no breakeven)")
     ap.add_argument("--keep-market", action="store_true")
     ap.add_argument("--data", default=str(REAL_DATA), help="the real data root (read only); default this checkout's")
     a = ap.parse_args(argv)
@@ -93,13 +95,18 @@ def main(argv: list[str] | None = None) -> int:
         if a.answers != "claude" and (source is None or not source.exists()):
             raise ValueError(f"--answers {a.answers} needs an existing --source app.db")
         archive = real / "shared" / "news_archive"
+        mgmt = {k: float(v) for k, v in (kv.split("=") for kv in a.mgmt.split(",") if kv)}
+        if mgmt and a.answers == "claude":
+            raise ValueError("--mgmt changes stored answers: --answers replay or production")
+        if set(mgmt) - {"be_r", "tp_r"}:
+            raise ValueError(f"--mgmt: unknown key(s) {sorted(set(mgmt) - {'be_r', 'tp_r'})}")
         if a.news and (miss := missing_news_weeks(archive, start, end)):
             raise ValueError(f"--news: no archived calendar for the New York week(s) {', '.join(miss)} in {archive}")
     except ValueError as exc:
         print(f"backtest: invalid: {exc}", file=sys.stderr)
         return 3
     rc = RunConfig(start_ms=start, end_ms=end, equity=a.equity, answers=a.answers, source=source,
-                   max_calls=a.max_calls, news=a.news, news_archive=archive, brief=a.brief)
+                   max_calls=a.max_calls, news=a.news, news_archive=archive, brief=a.brief, mgmt=mgmt)
     rc.ai = {**rc.ai, "daily_calls_per_pair": a.calls_per_day}
     run_id = a.run_id or run_id_for(rc)
     run_root = real / "backtests" / run_id
@@ -124,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     meta = {"run_id": run_id, "pair": rc.pair, "from": iso(start), "to": iso(end), "from_ms": start, "to_ms": end,
             "answers": a.answers, "source": str(source) if source else None, "equity": a.equity, "news": a.news,
             "max_calls": a.max_calls, "brief": s.pairs[rc.pair].desk.brief if s.pairs[rc.pair].desk else None,
+            "mgmt": mgmt or None,
             "result": result}
     doc = report.write(run_root, s, meta, source)
     try:
