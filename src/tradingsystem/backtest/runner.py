@@ -57,6 +57,7 @@ class RunConfig:
     max_calls: int = 150
     news: bool = False                       # the news blackout: the archived real calendar of each week (B5)
     news_archive: Path | None = None         # <data>/shared/news_archive (news.ARCHIVE_DIR): <NY Sunday>.json
+    brief: str | None = None                 # another desk brief for the run (an A/B of the prompt), e.g. desks/xau_live_b
     ai: dict = field(default_factory=lambda: {"daily_calls_per_pair": 60, "min_minutes_between_calls": 15,
                                               "review_floor_minutes": 10, "event_calls_per_day": 12})
     step_ms: int = STEP_MS
@@ -93,8 +94,12 @@ def run_settings(config: Path, run_root: Path, rc: RunConfig) -> Settings:
     s = load_settings(config, local_path=run_root / "no.local.yaml", env_path=run_root / "no.env",
                       extra_env={"TS_INSTANCE": rc.pair, "EXECUTION_MODE": "paper", "EXECUTION_TRIGGER": "auto"})
     pc = s.pairs[rc.pair]
-    pairs = {**s.pairs, rc.pair: pc.model_copy(update={
-        "news_blackout": pc.news_blackout.model_copy(update={"enabled": bool(rc.news)})})}
+    upd = {"news_blackout": pc.news_blackout.model_copy(update={"enabled": bool(rc.news)})}
+    if rc.brief:
+        if pc.desk is None:
+            raise ValueError(f"{rc.pair} has no desk: no brief to replace")
+        upd["desk"] = pc.desk.model_copy(update={"brief": rc.brief})
+    pairs = {**s.pairs, rc.pair: pc.model_copy(update=upd)}
     s = s.model_copy(update={
         "paths": PathsCfg(data_dir=str(run_root / "data"), logs_dir=str(run_root / "logs"), instance=rc.pair),
         "execution": s.execution.model_copy(update={"mode": "paper", "trigger": "auto", "paper_equity": rc.equity}),

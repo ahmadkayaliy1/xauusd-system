@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--news", action="store_true",
                     help="news blackout on, from the archived real calendars (data/shared/news_archive/<NY Sunday>.json)")
     ap.add_argument("--run-id")
+    ap.add_argument("--brief", help="another desk brief for this run (prompt A/B), e.g. desks/xau_live_b")
     ap.add_argument("--keep-market", action="store_true")
     ap.add_argument("--data", default=str(REAL_DATA), help="the real data root (read only); default this checkout's")
     a = ap.parse_args(argv)
@@ -98,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"backtest: invalid: {exc}", file=sys.stderr)
         return 3
     rc = RunConfig(start_ms=start, end_ms=end, equity=a.equity, answers=a.answers, source=source,
-                   max_calls=a.max_calls, news=a.news, news_archive=archive)
+                   max_calls=a.max_calls, news=a.news, news_archive=archive, brief=a.brief)
     rc.ai = {**rc.ai, "daily_calls_per_pair": a.calls_per_day}
     run_id = a.run_id or run_id_for(rc)
     run_root = real / "backtests" / run_id
@@ -122,7 +123,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     meta = {"run_id": run_id, "pair": rc.pair, "from": iso(start), "to": iso(end), "from_ms": start, "to_ms": end,
             "answers": a.answers, "source": str(source) if source else None, "equity": a.equity, "news": a.news,
-            "max_calls": a.max_calls, "result": result}
+            "max_calls": a.max_calls, "brief": s.pairs[rc.pair].desk.brief if s.pairs[rc.pair].desk else None,
+            "result": result}
     doc = report.write(run_root, s, meta, source)
     try:
         base = baseline_section(s, real, rc.pair, doc["trades"], start, end)

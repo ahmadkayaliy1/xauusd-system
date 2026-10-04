@@ -197,7 +197,7 @@ def coverage(s: Settings, pair: str, start: int, end: int) -> dict:
 def render(meta: dict, tr: list[dict], summ: dict, cl: dict, cal: list[dict] | None, cov: dict | None = None) -> str:
     L = [f"# Backtest {meta['run_id']}", "",
          f"Period {meta['from']} → {meta['to']} · pair {meta['pair']} · answers `{meta['answers']}` · start equity "
-         f"${meta['equity']:.2f} · news blackout {'on' if meta['news'] else 'OFF (no historical calendar)'} · "
+         f"${meta['equity']:.2f} · brief `{meta.get('brief')}` · news blackout {'on (archived real calendar)' if meta['news'] else 'OFF'} · "
          f"{meta['result'].get('stopped_by') or 'ran to the end'} · {meta['result'].get('real_s')} s real time.", "",
          "Paper execution on the real recorded ticks (bid/ask), the production engine, gate and management on a "
          "simulated clock; the answer of a call reaches the executor after its real latency. Swap added per "
