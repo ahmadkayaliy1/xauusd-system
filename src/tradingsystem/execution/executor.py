@@ -49,7 +49,7 @@ from .desk import (REVIEW_EVENT, SHADOW_KEY, ShadowGuard, ShadowViolation, asser
                    reviews_due, shadow_pairs, with_weekend_flat)
 from .drawdown import AccountPeak
 from .exposure import live_sides
-from ..analysis.desk_windows import weekend_flat_ms
+from ..analysis.desk_windows import desk_window_state, weekend_flat_ms
 from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
 from .metrics import VIRTUAL_HORIZON_MS, MetricsJob, mt5_outcome_detail, paper_outcome_detail, virtual_valid_until
 from ..core.tunables import Tunables
@@ -416,6 +416,23 @@ class Executor:
             log.exception("%s: news blackout check failed", pair)
             return False, f"news blackout check failed ({type(exc).__name__}) - refused"
 
+    def _desk_check(self, pair: str) -> tuple[bool, str] | None:
+        """D-052: the gate's ``desk_clock`` check for a LIVE desk - the desk's own clock at placement (the Friday
+        cutoff, the reopen grace, a flat ahead or in force, its windows; the news is its own check), so an answer that
+        arrives late, or one to a review call, cannot open a trade the engine would not have asked for. None for any
+        other pair (no check). An unexpected error refuses (fail closed)."""
+        pcfg = self.s.pairs.get(pair)
+        desk = pcfg.desk if pcfg is not None else None
+        if desk is None or desk.mode != "live":
+            return None
+        try:
+            exe = self.reg.with_role(pair, "execution")[0]
+            ok, why = desk_window_state(desk, now_ms(), calendar_for(exe.venue, exe.symbol, pcfg.asset_class), pair)
+            return (True, f"open ({why})") if ok else (False, f"no new entry now: {why}")
+        except Exception as exc:  # noqa: BLE001 - a money path: unknown = refused
+            log.exception("%s: desk clock check failed", pair)
+            return False, f"desk clock check failed ({type(exc).__name__}) - refused"
+
     def _refuse(self, did: str, pair: str, state: str, detail: dict) -> None:
         """A candidate that never reached the gate (not enabled, expired, no quote): a real pair is ``state``; a shadow
         idea stays ``not_executed`` with the shadow record (it is still scored in R from its levels)."""
@@ -471,7 +488,7 @@ class Executor:
             sibling_risk_pct_by_pair=acct.get("sibling_risk_pct_by_pair", {}),
             live_sides=live_sides(acct.get("exposure") or [], pair),
             account_drawdown_pct=dd.drawdown_pct if dd else None, account_drawdown_tripped=bool(dd and dd.tripped),
-            news=self._news_check(pair))
+            news=self._news_check(pair), desk=self._desk_check(pair))
         gate = evaluate(rec_x, pair, ctx, self.s.risk, self.s.risk.correlated_groups,
                         min_confidence=self.tunables.get(pair).min_confidence)
         detail = {"gate": [{"check": n, "ok": ok, "detail": d} for n, ok, d in gate.checks],

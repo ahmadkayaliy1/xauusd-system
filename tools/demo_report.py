@@ -694,6 +694,7 @@ def pair_section(sp: Settings, pair: str, w: dict[str, Any], ledger: list[dict[s
             rep["hashes_seen"] = hashes_seen(con, pair, since, until)
             if sp.pairs[pair].desk is not None:                # B19: the shadow desk's ideas (no baseline here)
                 rep["desk"] = desk_section(con, sp, pair, since, until)
+                rep["desk"]["mode"] = sp.pairs[pair].desk.mode   # D-052: a live desk's trades are in the main lines
     except sqlite3.Error as exc:
         rep["error"] = f"database unreadable: {exc}"[:200]
     finally:
@@ -1289,7 +1290,11 @@ def render(d: dict[str, Any]) -> str:
             dk = r.get("desk")
             if dk and not dk.get("error"):
                 sh, ok = dk["shadow"], dk["desk_ok"]
-                p(f"- gold desk in shadow (D-049; never sent): shadow ideas {sh['n']}, desk_ok {ok['n']} (resolved "
+                if dk.get("mode") == "live":
+                    p("- gold desk LIVE on the demo account (D-052): its trades are in the lines above; the shadow "
+                      f"ideas recorded before the switch: {sh['n']} (desk_ok {ok['n']})")
+                else:
+                    p(f"- gold desk in shadow (D-049; never sent): shadow ideas {sh['n']}, desk_ok {ok['n']} (resolved "
                   f"{ok['resolved']}, expectancy after the spread {_num(ok['expectancy_r'])} R); calls per UTC day "
                   f"{_counts(dk['calls_per_day'])} — the baseline and the H32 verdict: `tools/desk_report.py --print`")
             elif dk:

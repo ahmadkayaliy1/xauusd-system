@@ -43,6 +43,9 @@ class ExecContext:
     # Phase 5 B8: (ok, detail) of the pair's news blackout (analysis.news.gate_check); None = the pair has none - no
     # check is added, so the gate output of a pair without it is unchanged
     news: tuple[bool, str] | None = None
+    # D-052: (ok, detail) of a LIVE desk's clock at placement (no new entry after the Friday cutoff, in the reopen grace,
+    # before a flat or outside its windows); None = not a live desk - no check, the gate output of the others unchanged
+    desk: tuple[bool, str] | None = None
 
 
 @dataclass
@@ -132,6 +135,8 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
     add("confidence", rec.get("confidence", 0) >= min_confidence, f"{rec.get('confidence')} (≥{min_confidence})")
     if ctx.news is not None:
         add("news_blackout", ctx.news[0], ctx.news[1])
+    if ctx.desk is not None:
+        add("desk_clock", ctx.desk[0], ctx.desk[1])
     if sl is None:
         return GateResult(False, checks)
     spread = ctx.ask - ctx.bid

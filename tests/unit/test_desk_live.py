@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from tradingsystem.analysis.desk_windows import (WEEKEND_FLAT_SPAN_MS, desk_window_state, friday_flat_ms,
                                                  last_window_end, weekend_flat_ms)
-from tradingsystem.core.settings import DeskCfg, DeskClockCfg, load_settings
+from tradingsystem.core.settings import DeskCfg, DeskClockCfg, DeskDateFlatCfg, DeskWindowCfg, load_settings
 from tradingsystem.core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, iso
 from tradingsystem.execution import desk as desk_mod
 from tradingsystem.execution import executor as ex_mod
@@ -98,14 +98,14 @@ def test_the_weekend_flat_follows_new_york_time_and_lasts_the_rest_of_friday():
 
 
 # ------------------------------------------------------------------------------------------------ the gate
-def live_settings(tmp_path, equity=107.38):
+def live_settings(tmp_path, equity=107.38, desk=LIVE):
     s = H.settings(tmp_path, desk=True, equity=equity)
-    pairs = {**s.pairs, "XAUUSD": s.pairs["XAUUSD"].model_copy(update={"desk": LIVE})}
+    pairs = {**s.pairs, "XAUUSD": s.pairs["XAUUSD"].model_copy(update={"desk": desk})}
     return s.model_copy(update={"pairs": pairs, "risk": s.risk.model_copy(update=D052_RISK)})
 
 
-def run(tmp_path, monkeypatch, *, equity=107.38, **kw):
-    ex = H.make_executor(live_settings(tmp_path, equity), monkeypatch)
+def run(tmp_path, monkeypatch, *, equity=107.38, desk=LIVE, **kw):
+    ex = H.make_executor(live_settings(tmp_path, equity, desk), monkeypatch)
     did = "a" * 32
     ex.handle(H.store_candidate(ex, "XAUUSD", H.rec("XAUUSD", **kw), did))
     st, det = H.stored(ex, did)
@@ -245,6 +245,67 @@ def test_the_live_brief_is_versioned_small_and_says_the_live_rules():
     from tradingsystem.ai.prompts import _read_versioned
     text, name, version = _read_versioned("desks/xau_live.md")
     assert (name, version) == ("desks/xau_live", 1)
-    assert len(text) / 3.6 <= 600                          # ≈ 570 tokens in the cached system prompt
+    assert len(text) / 3.6 <= 650                          # ≈ 620 tokens in the cached system prompt
+    assert "15:00 New York" in text and "holiday close" in text
     assert "SENT" in text and "15 %" in text and "30 %" in text and "16:30 New York" in text
     assert "never widen" in text and "NO_TRADE" in text
+
+
+# ------------------------------------------------------------------------------------------------ the review's fixes
+HOLIDAY = LIVE.model_copy(update={"holiday_flats": [
+    DeskDateFlatCfg(date="2026-11-26", time="12:00", tz="America/New_York")]})       # Thanksgiving, EST: 17:00 UTC
+
+
+def test_a_holiday_flat_closes_entries_90_min_before_and_flattens_for_the_rest_of_the_session():
+    flat = utc(2026, 11, 26, 17, 0)
+    assert desk_window_state(HOLIDAY, flat - 95 * MS_PER_MINUTE, Open()) == (True, "all_day")
+    assert desk_window_state(HOLIDAY, flat - 75 * MS_PER_MINUTE, Open()) == (False, "pre_flat")
+    assert desk_window_state(HOLIDAY, flat + 5 * MS_PER_MINUTE, Open()) == (False, "pre_flat")
+    assert weekend_flat_ms(HOLIDAY, flat + 5 * MS_PER_MINUTE) == flat
+    assert weekend_flat_ms(HOLIDAY, flat - 1) is None
+    shadow = DeskCfg()                                       # the shadow desk's clock is unchanged
+    assert desk_window_state(shadow, utc(2026, 9, 23, 7, 0), Open()) == (True, "london")
+
+
+def test_the_review_before_a_holiday_flat_names_it():
+    pcfg = SimpleNamespace(desk=HOLIDAY, news_blackout=SimpleNamespace(enabled=False))
+    flat = utc(2026, 11, 26, 17, 0)
+    ((kind, key, text),) = desk_mod.reviews_due(pcfg, None, flat - 10 * MS_PER_MINUTE)
+    assert (kind, key) == ("weekend", str(flat)) and "holiday" in text
+
+
+def test_the_gate_refuses_a_live_desk_entry_outside_its_clock(tmp_path, monkeypatch):
+    london_only = LIVE.model_copy(update={"windows": [DeskWindowCfg(name="london", tz="Europe/London",
+                                                                    start="07:45", end="11:00")]})
+    ex, did, st, det = run(tmp_path, monkeypatch, sl_dist=9.6, desk=london_only)      # NOW = 14:13 UTC: outside
+    try:
+        assert st == "rejected" and failed(det) == ["desk_clock"] and not ex.paper.decision_legs(did)
+        g = next(x for x in det["gate"] if x["check"] == "desk_clock")
+        assert "outside_window" in g["detail"]
+    finally:
+        ex.paper.close()
+
+
+def test_the_gate_check_exists_only_for_a_live_desk(tmp_path, monkeypatch):
+    ex, did, st, det = run(tmp_path, monkeypatch, sl_dist=9.6)
+    try:
+        assert next(x for x in det["gate"] if x["check"] == "desk_clock")["ok"] is True
+    finally:
+        ex.paper.close()
+    s = H.settings(tmp_path / "plain", desk=False)
+    ex2 = H.make_executor(s, monkeypatch)
+    try:
+        assert ex2._desk_check("XAUUSD") is None and ex2._desk_check("BTCUSDT") is None
+    finally:
+        ex2.paper.close()
+
+
+def test_unknown_holdings_hold_back_a_live_desks_entry_trigger_but_not_its_review(desk, monkeypatch):
+    make_live(desk, windows=desk.s.pairs["XAUUSD"].desk.windows)   # WED_0510 is outside the windows
+    fire_as(desk, monkeypatch, "new strong setup", "strong")
+    tick(desk, WED_0510)                                  # the executor reports nothing: holdings unknown
+    assert "XAUUSD" not in desk.rec.dispatched
+    desk.rec.dispatched.clear()
+    fire_as(desk, monkeypatch, "review: price_above", "review")
+    tick(desk, WED_0510 + 5 * MS_PER_MINUTE)
+    assert "XAUUSD" in desk.rec.dispatched

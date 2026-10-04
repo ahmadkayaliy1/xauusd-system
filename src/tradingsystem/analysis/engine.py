@@ -355,7 +355,8 @@ class Engine:
                 self._build_ms.append(int((time.perf_counter() - t0) * 1000))
             evs = self._pair_events(pair)
             wake = [e for e in evs if now - int(e["ts"]) >= EVENT_COALESCE_MS] and evs      # all, once the first is ripe
-            if wake and not self._event_budget(pair, now):
+            # D-052: a live desk's review before a release / a flat protects an open trade - never dropped by the budget
+            if wake and not self._event_budget(pair, now) and not any(e["event"] == "desk_review" for e in wake):
                 self._events[pair] = []                  # today's event calls are used up: the events stay in history
                 wake = []
                 self._save_cursor()
@@ -388,8 +389,10 @@ class Engine:
         news = self._news_state.get(pair)
         if desk is not None:
             ok, why = desk_window_state(desk, now, cal, pair, desk_news_reason(news))
-            return (not ok, why, f"{why}:{last_window_end(desk, now)}")
-        if news is not None and news.blocked:              # B8: no entry call inside a release's blackout window
+            if not ok or desk.mode != "live":
+                return (not ok, why, f"{why}:{last_window_end(desk, now)}")
+            # D-052: a live desk trades - past its clock, the no-fit rule of every traded pair applies (B12)
+        elif news is not None and news.blocked:            # B8: no entry call inside a release's blackout window
             return True, "news_blackout", f"news_blackout:{news.blackout[1].time_ms}"
         if not self.s.ai.skip_entry_calls_when_no_fit:
             return False, "", ""
@@ -406,7 +409,7 @@ class Engine:
         is recorded per hour (no fit) or per gap between windows (desk). A pair holding a position or a pending order
         keeps its review and event calls (only entry triggers wait); a pair whose holdings are unknown is never
         held back by B12 (a shadow desk holds nothing by design, so unknown counts as nothing there; a live desk,
-        D-052, may hold a trade, so unknown is not held back either). Never raises."""
+        D-052, may hold a trade: unknown keeps its review and event calls, but an entry trigger waits). Never raises."""
         try:
             hold, why, key = self._entry_suppression(pair, now, cal, payload)
             if not hold:
@@ -414,7 +417,9 @@ class Engine:
                 return False
             held = self._holds(pair)
             desk = self.s.pairs[pair].desk
-            if held is None and (desk is None or desk.mode != "shadow"):
+            if held is None and desk is None:
+                return False
+            if held is None and desk.mode == "live" and strength not in ENTRY_KINDS:
                 return False
             if held and strength not in ENTRY_KINDS:
                 return False
@@ -425,8 +430,10 @@ class Engine:
                 mid = _payload_mid(payload)
                 if mid:
                     self.store.kv_set(f"{pair}:last_call_price", mid)
-            if not held and self._events.get(pair):
-                self._events[pair] = []                  # the events stay in history; they do not wake a later call
+            if (held is False or (held is None and desk.mode != "live")) and self._events.get(pair):
+                # nothing held: the events stay in history and do not wake a later call (a live desk whose holdings
+                # are unknown keeps them - they may be its fills)
+                self._events[pair] = []
                 self._save_cursor()
             prev = self._skip_noted.get(pair)
             if prev is None or prev[0] != key or (why == "no_fit" and now - prev[1] >= MS_PER_HOUR):
