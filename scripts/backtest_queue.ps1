@@ -23,7 +23,7 @@ $env:PYTHONPATH = Join-Path $root 'src'
 Set-Location $root
 "$(Get-Date -Format o) queue runner started (pid $PID)" | Out-File -Append $log -Encoding utf8
 while ($true) {
-    $lines = Get-Content (Join-Path $bt 'queue.txt') -ErrorAction SilentlyContinue | ForEach-Object { $_ -replace '^﻿', '' } | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' }
+    $lines = Get-Content (Join-Path $bt 'queue.txt') -ErrorAction SilentlyContinue | ForEach-Object { $_.TrimStart([char]0xFEFF) } | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' }
     $next = $null
     foreach ($l in $lines) {
         $id = ($l -split '\s+')[0]
