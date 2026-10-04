@@ -44,6 +44,7 @@ log = logging.getLogger("backtest")
 STEP_MS = 5_000                      # clock step while a position / order is live
 HOUSEKEEPING_MS = 60_000             # virtual outcomes + metrics, as the live executor (every minute)
 SCREEN_SETTLE_MS = 6_000             # the engine screens this long after a 5-minute close (its SETTLE_MS is 5 s)
+MAX_ERROR_CYCLES = 2                 # a slow / failed call happens live too; more than this = not a clean run
 SUSPEND_S = 60                       # a wall/monotonic gap larger than this = the computer slept during the run
 DUE_KEY = "bt:due:"                  # engine_kv: when a run's answer reached its executor (replay uses it exactly)
 PROVIDER_WAIT_S = 120                # real seconds to wait for the provider's sign-in check before the clock starts
@@ -249,7 +250,7 @@ class Backtest:
                 timeutil.set_sim_clock(None)
                 keep_awake(False)
         errors = self._error_cycles()
-        interrupted = bool(self.suspended_s) or errors > 0
+        interrupted = bool(self.suspended_s) or errors > MAX_ERROR_CYCLES
         return {"calls": self.calls, "stopped_by": self.stopped_by, "end": iso(self.clock), "real_s": round(self.real_s),
                 "suspended_s": round(self.suspended_s), "error_cycles": errors, "interrupted": interrupted}
 
