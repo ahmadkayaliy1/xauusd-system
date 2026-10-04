@@ -92,6 +92,7 @@ def assert_not_shadow(pairs: frozenset[str], pair: str, what: str) -> None:
 # while it holds a trade - before a fomc/high release and before the flat - as executor events the engine wakes on.
 WEEKEND_RULE_NOTE = "desk: flat before the weekend / a holiday close (D-052)"
 REVIEW_EVENT = "desk_review"
+RESUME_REVIEW_MS = 5 * 60_000        # back after an outage at least this long with a trade open: one review call
 
 
 def live_desk_pairs(s: Settings) -> frozenset[str]:
