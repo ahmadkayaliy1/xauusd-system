@@ -433,6 +433,19 @@ class Executor:
             log.exception("%s: desk clock check failed", pair)
             return False, f"desk clock check failed ({type(exc).__name__}) - refused"
 
+    def _losing_trades_today(self, pair: str) -> int:
+        """D-052: the pair's losing trades of the UTC day for the gate's loss stop (0 when the stop is off). An error
+        counts as the limit reached (a money path: unknown = refused)."""
+        lim = self.s.risk.max_losing_trades_per_day
+        if lim is None:
+            return 0
+        try:
+            now = now_ms()
+            return self.store.losing_trades_since(pair, now - now % MS_PER_DAY)
+        except Exception:  # noqa: BLE001
+            log.exception("%s: the day's losing trades could not be counted - refused", pair)
+            return lim
+
     def _refuse(self, did: str, pair: str, state: str, detail: dict) -> None:
         """A candidate that never reached the gate (not enabled, expired, no quote): a real pair is ``state``; a shadow
         idea stays ``not_executed`` with the shadow record (it is still scored in R from its levels)."""
@@ -488,7 +501,8 @@ class Executor:
             sibling_risk_pct_by_pair=acct.get("sibling_risk_pct_by_pair", {}),
             live_sides=live_sides(acct.get("exposure") or [], pair),
             account_drawdown_pct=dd.drawdown_pct if dd else None, account_drawdown_tripped=bool(dd and dd.tripped),
-            news=self._news_check(pair), desk=self._desk_check(pair))
+            news=self._news_check(pair), desk=self._desk_check(pair),
+            losing_trades_today=self._losing_trades_today(pair))
         gate = evaluate(rec_x, pair, ctx, self.s.risk, self.s.risk.correlated_groups,
                         min_confidence=self.tunables.get(pair).min_confidence)
         detail = {"gate": [{"check": n, "ok": ok, "detail": d} for n, ok, d in gate.checks],

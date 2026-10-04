@@ -46,6 +46,8 @@ class ExecContext:
     # D-052: (ok, detail) of a LIVE desk's clock at placement (no new entry after the Friday cutoff, in the reopen grace,
     # before a flat or outside its windows); None = not a live desk - no check, the gate output of the others unchanged
     desk: tuple[bool, str] | None = None
+    # D-052: the pair's losing trades of the UTC day (outcome closed_loss); checked only with risk.max_losing_trades_per_day
+    losing_trades_today: int = 0
 
 
 @dataclass
@@ -204,5 +206,9 @@ def evaluate(rec: dict, pair: str, ctx: ExecContext, risk: RiskCfg, correlated_g
     add("daily_loss_worst_case", worst >= -risk.max_daily_loss_pct,
         f"realised today {realised:.2f}% − open SL risk {open_risk:.2f}% − this trade "
         f"{size.risk_pct if size.ok else 0:.2f}% = {worst:.2f}% (≥ −{risk.max_daily_loss_pct}%)")
+    if risk.max_losing_trades_per_day is not None:      # D-052: the day's loss stop (absent = the gate output unchanged)
+        n = ctx.losing_trades_today
+        add("losing_trades_today", n < risk.max_losing_trades_per_day,
+            f"{n} losing trade(s) of this pair today (no new entry from {risk.max_losing_trades_per_day})")
     approved = all(ok for _, ok, _ in checks)
     return GateResult(approved, checks, entry, size, rr, single)

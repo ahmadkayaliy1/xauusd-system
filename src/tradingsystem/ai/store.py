@@ -204,6 +204,13 @@ class DecisionStore:
                               "SET value=excluded.value, updated_ms=excluded.updated_ms",
                               (key, json.dumps(value, default=str), now_ms()))
 
+    def losing_trades_since(self, pair: str, since_ms: int) -> int:
+        """D-052: the pair's executed decisions settled ``closed_loss`` since ``since_ms`` (the day's loss stop)."""
+        with self._lock:
+            r = self._con.execute("SELECT count(*) FROM ai_decisions WHERE pair=? AND outcome='closed_loss' AND "
+                                  "outcome_ts>=?", (pair, since_ms)).fetchone()
+        return int(r[0] or 0)
+
     def events_after(self, after_id: int, kinds: tuple[str, ...], collector: str = "executor",
                      limit: int = 200) -> list[dict[str, Any]]:
         """``ingestion_events`` rows of ``collector`` newer than ``after_id`` (the executor's fills, closes, outcomes,

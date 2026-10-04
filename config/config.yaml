@@ -151,6 +151,7 @@ risk:                                  # D-052 (owner, 2026-10-01, the DEMO acco
   sl_atr_max_mult: 5.0
   max_spread_to_sl_ratio: 0.2
   account_drawdown_stop_pct: 100       # off (D-052): only the daily limit stops trading (100 = equity at zero)
+  max_losing_trades_per_day: 3         # D-052 (owner, 2026-10-04): no new entry after the day's 3rd losing trade
   min_confidence: 55                   # the gate executes nothing below this (was hard-coded)
   max_recommendation_age_s: 300
   max_data_staleness_s: 120

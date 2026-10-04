@@ -32,7 +32,8 @@ from .test_engine_rationing import eng  # noqa: F401
 
 UTC = dt.timezone.utc
 D052_RISK = {"max_risk_per_trade_pct": 15.0, "max_daily_loss_pct": 30.0, "max_effective_leverage": 60.0,
-             "account_drawdown_stop_pct": 100.0, "max_correlated_risk_pct": 30.0}
+             "account_drawdown_stop_pct": 100.0, "max_correlated_risk_pct": 30.0,
+             "max_losing_trades_per_day": 3}
 FLAT = DeskClockCfg(time="16:30", tz="America/New_York")
 LIVE = DeskCfg(mode="live", brief="desks/xau_live", windows=[], friday_cutoff=DeskClockCfg(time="15:00",
                tz="America/New_York"), flat_before_weekend=FLAT, pre_news_review_min=15)
@@ -309,3 +310,58 @@ def test_unknown_holdings_hold_back_a_live_desks_entry_trigger_but_not_its_revie
     fire_as(desk, monkeypatch, "review: price_above", "review")
     tick(desk, WED_0510 + 5 * MS_PER_MINUTE)
     assert "XAUUSD" in desk.rec.dispatched
+
+
+# ------------------------------------------------------------------------------------------------ the day's loss stop
+def add_losses(db, n, at, pair="XAUUSD", first=0):
+    import sqlite3 as _sq
+    from tradingsystem.ai.store import DecisionRecord, DecisionStore
+    st = DecisionStore(db)
+    try:
+        for k in range(first, first + n):
+            rec = DecisionRecord(pair, "agent_per_pair", "t", "valid", recommendation={"decision": "SELL"},
+                                 id=f"{k:031x}f", ts=at - 3_600_000)
+            st.save(rec)
+    finally:
+        st.close()
+    con = _sq.connect(db)
+    con.execute("UPDATE ai_decisions SET execution_state='executed', outcome='closed_loss', outcome_ts=? "
+                "WHERE id LIKE '%f'", (at - 600_000,))
+    con.commit()
+    con.close()
+
+
+def test_the_gate_refuses_a_new_entry_after_the_days_third_losing_trade(tmp_path, monkeypatch):
+    s = live_settings(tmp_path)
+    ex = H.make_executor(s, monkeypatch)
+    try:
+        add_losses(ex.app_db, 2, H.NOW)
+        assert ex._losing_trades_today("XAUUSD") == 2
+        ex.handle(H.store_candidate(ex, "XAUUSD", H.rec("XAUUSD", sl_dist=9.6), "b" * 32))
+        assert H.stored(ex, "b" * 32)[0] == "executed"                  # two losses: still allowed
+        add_losses(ex.app_db, 1, H.NOW, first=2)                        # the third
+        assert ex._losing_trades_today("XAUUSD") == 3
+        ex.handle(H.store_candidate(ex, "XAUUSD", H.rec("XAUUSD", side="SELL", sl_dist=9.6), "c" * 32))
+        st, det = H.stored(ex, "c" * 32)
+        assert st == "rejected" and failed(det) == ["losing_trades_today"]
+    finally:
+        ex.paper.close()
+
+
+def test_without_the_setting_there_is_no_such_check(tmp_path, monkeypatch):
+    ex, did, st, det = run(tmp_path, monkeypatch, sl_dist=9.6)
+    try:
+        assert any(g["check"] == "losing_trades_today" for g in det["gate"])     # the live settings carry it
+    finally:
+        ex.paper.close()
+    s = H.settings(tmp_path / "plain", desk=False)
+    assert s.risk.max_losing_trades_per_day is None                           # BTC/ETH and the code default: off
+
+
+def test_after_the_loss_stop_the_engine_makes_no_entry_call_but_keeps_reviews(desk, monkeypatch):
+    make_live(desk)
+    desk.s = desk.s.model_copy(update={"risk": desk.s.risk.model_copy(update={"max_losing_trades_per_day": 3})})
+    add_losses(desk.s.paths.state() / "app.db", 3, WED_0510)
+    fire_as(desk, monkeypatch, "new strong setup", "strong")
+    tick(desk, WED_0510)
+    assert "XAUUSD" not in desk.rec.dispatched and n_events(desk, "skipped: loss_stop") == 1
