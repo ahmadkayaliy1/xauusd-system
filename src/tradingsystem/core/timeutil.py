@@ -23,9 +23,22 @@ class NaiveDatetimeError(ValueError):
     """Raised when a timezone-less datetime reaches a time-sensitive API."""
 
 
+_SIM_CLOCK = None      # P12.7: a backtest's simulated clock (tools/backtest only); None = the wall clock
+
+
 def now_ms() -> int:
-    """Current wall-clock time as UTC epoch milliseconds."""
-    return time.time_ns() // 1_000_000
+    """Current wall-clock time as UTC epoch milliseconds — or, inside a backtest process, its simulated clock (every
+    module calls this one function, so the whole system runs on the replayed time; durations and timeouts keep using
+    ``time``)."""
+    clock = _SIM_CLOCK
+    return clock() if clock is not None else time.time_ns() // 1_000_000
+
+
+def set_sim_clock(clock) -> None:
+    """Install (a callable returning UTC ms) or remove (None) the simulated clock. Only the backtest runner calls this;
+    a production process never does."""
+    global _SIM_CLOCK
+    _SIM_CLOCK = clock
 
 
 def ensure_aware(dt: _dt.datetime) -> _dt.datetime:

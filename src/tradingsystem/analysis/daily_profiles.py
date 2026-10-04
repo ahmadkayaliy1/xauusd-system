@@ -25,7 +25,7 @@ from typing import Any
 import numpy as np
 
 from ..core.timeframes import Timeframe
-from ..core.timeutil import MS_PER_MINUTE
+from ..core.timeutil import MS_PER_MINUTE, now_ms
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
 from . import orderflow as of
@@ -128,7 +128,7 @@ class DailyProfiles:
 
     def __init__(self, data_dir, cache_mb: int, kv: Any = None, now=None) -> None:
         self.data_dir, self.cache_mb, self.kv = data_dir, cache_mb, kv
-        self._now = now or (lambda: int(time.time() * 1000))
+        self._now = now or now_ms                   # the backtest's simulated clock too (P12.7)
         self._mem: dict[str, dict] = {}
         self._threads: dict[str, threading.Thread] = {}
         self._lock = threading.Lock()
