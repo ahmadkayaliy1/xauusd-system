@@ -45,8 +45,8 @@ from ..storage.tablespec import spec_for
 from .action_gate import ActionContext
 from .action_gate import evaluate as gate_action
 from .backends.paper import PaperBackend, Tick
-from .desk import (REVIEW_EVENT, SHADOW_KEY, ShadowGuard, ShadowViolation, assert_not_shadow, live_desk_pairs,
-                   reviews_due, shadow_pairs, with_weekend_flat)
+from .desk import (RESUME_REVIEW_MS, REVIEW_EVENT, SHADOW_KEY, ShadowGuard, ShadowViolation, assert_not_shadow,
+                   live_desk_pairs, reviews_due, shadow_pairs, with_weekend_flat)
 from .drawdown import AccountPeak
 from .exposure import live_sides
 from ..analysis.desk_windows import desk_window_state, weekend_flat_ms
@@ -167,6 +167,11 @@ class Executor:
         self.clear_error = True                            # first healthy loop clears a stale last_error
         self._warned: set[str] = set()
         self.started = now_ms()
+        try:                                  # D-052: the previous run's last beat - an outage the desk reviews after
+            prev = next((r for r in self.appdb.statuses() if r["collector"] == "executor"), None)
+            self.down_since = int(prev["updated_ms"]) if prev and prev.get("updated_ms") else None
+        except Exception:  # noqa: BLE001 — a courtesy review, never a reason not to start
+            self.down_since = None
         self.mt5_quiet_until = 0
         self.stop = False
         # Phase 3 (P9.6 / D-043): the system manages its trades; the model may act on them within the action gate
@@ -1031,8 +1036,14 @@ class Executor:
         if not live:
             return
         now = now_ms()
+        down = self.started - self.down_since if self.down_since is not None else 0
         for pair in sorted(live & {d["pair"] for d in self._open_decisions()}):
-            for kind, key, text in reviews_due(self.s.pairs[pair], self.s.paths.shared(), now):
+            due = reviews_due(self.s.pairs[pair], self.s.paths.shared(), now)
+            if down >= RESUME_REVIEW_MS:     # back after an outage with a trade open: nothing managed it meanwhile
+                due.append(("resume", str(self.started),
+                            f"the system was off from {iso(self.down_since)} to {iso(self.started)} "
+                            f"({down // MS_PER_MINUTE} min) - no management ran meanwhile: review the open trade (D-052)"))
+            for kind, key, text in due:
                 kv = f"{pair}:desk_review:{kind}"
                 if self.store.kv_get(kv) == key:
                     continue

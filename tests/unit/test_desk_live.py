@@ -365,3 +365,20 @@ def test_after_the_loss_stop_the_engine_makes_no_entry_call_but_keeps_reviews(de
     fire_as(desk, monkeypatch, "new strong setup", "strong")
     tick(desk, WED_0510)
     assert "XAUUSD" not in desk.rec.dispatched and n_events(desk, "skipped: loss_stop") == 1
+
+
+def test_back_after_an_outage_with_a_trade_open_the_desk_asks_for_one_review(tmp_path, monkeypatch):
+    ex, did, st, _ = run(tmp_path, monkeypatch, sl_dist=9.6)
+    try:
+        assert st == "executed"
+        ex.down_since, ex.started = H.NOW - 20 * MS_PER_MINUTE, H.NOW      # the previous run's last beat: 20 min ago
+        ex.desk_reviews()
+        ex.desk_reviews()
+        (ev,) = review_events(ex)
+        assert ev["kind"] == "resume" and "20 min" in ev["text"]
+        ex2_down = H.NOW - 2 * MS_PER_MINUTE                               # a short restart: no review
+        ex.down_since, ex.started = ex2_down, H.NOW + 1
+        ex.desk_reviews()
+        assert len(review_events(ex)) == 1
+    finally:
+        ex.paper.close()
