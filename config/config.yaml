@@ -86,6 +86,14 @@ pairs:
       reopen_grace_min: 60           # [] = entry calls all day, Asia included (the model reads the session)
       friday_cutoff: {time: "15:00", tz: America/New_York}            # no new entry after it on Friday
       flat_before_weekend: {time: "16:30", tz: America/New_York}      # every open trade closed, orders cancelled
+      holiday_flats:                 # the same flat before a US holiday halt / early close / closure (the session calendar
+        - {date: "2026-11-26", time: "12:00", tz: America/New_York}   # knows no holidays). Conservative times (early
+        - {date: "2026-11-27", time: "12:00", tz: America/New_York}   # closes are ~13:00-13:45 New York); confirm and
+        - {date: "2026-12-24", time: "12:00", tz: America/New_York}   # extend from Windsor's holiday notices each
+        - {date: "2026-12-31", time: "12:00", tz: America/New_York}   # year. Thanksgiving, Christmas, New Year, MLK,
+        - {date: "2027-01-18", time: "12:00", tz: America/New_York}   # Presidents' Day, Good Friday (closed: the
+        - {date: "2027-02-15", time: "12:00", tz: America/New_York}   # Thursday before is the last session)
+        - {date: "2027-03-25", time: "16:30", tz: America/New_York}
       pre_news_review_min: 15        # a review call this long before a fomc/high release while a trade is open
     news_blackout:                   # B8 (D-046 a) with the gold tiers (D-049): the XAU engine fetches the public weekly
       enabled: true                  # calendar hourly into data/shared/news_calendar.json; the gate refuses entries inside

@@ -219,6 +219,23 @@ class DeskClockCfg(_Model):
         return self
 
 
+class DeskDateFlatCfg(_Model):
+    """D-052: an extra flat on a given date (the last session before a holiday closure or an early close), in a zone."""
+    date: str
+    time: str
+    tz: str
+
+    @model_validator(mode="after")
+    def _check(self) -> "DeskDateFlatCfg":
+        try:
+            dt.date.fromisoformat(self.date)
+        except ValueError as exc:
+            raise ValueError(f"desk.holiday_flats date {self.date!r}: YYYY-MM-DD") from exc
+        _check_hhmm(self.time, "desk holiday_flats time")
+        _check_tz(self.tz, "desk holiday_flats")
+        return self
+
+
 def _default_desk_windows() -> list[DeskWindowCfg]:
     return [DeskWindowCfg(name="london", tz="Europe/London", start="07:45", end="11:00"),
             DeskWindowCfg(name="new_york", tz="America/New_York", start="08:15", end="11:30")]
@@ -241,6 +258,9 @@ class DeskCfg(_Model):
     # D-052, live mode only: every open trade of the pair is closed (pending orders cancelled) from this Friday time on,
     # before the weekend gap; a review call comes WEEKEND_REVIEW_MIN earlier. None = held over the weekend.
     flat_before_weekend: DeskClockCfg | None = None
+    # D-052, live: the same flat on given dates - the last session before a holiday closure or an early close (the
+    # session calendar knows no holidays); no new entry in the 90 min before any flat
+    holiday_flats: list[DeskDateFlatCfg] = Field(default_factory=list)
     pre_news_review_min: int = Field(15, ge=0, le=120)  # live: a review call this long before a fomc/high release (0 = off)
 
     @model_validator(mode="after")
@@ -248,8 +268,9 @@ class DeskCfg(_Model):
         names = [w.name for w in self.windows]
         if len(set(names)) != len(names):
             raise ValueError("desk.windows: duplicate window names")
-        if self.flat_before_weekend is not None and self.mode != "live":
-            raise ValueError("desk.flat_before_weekend applies to a live desk only (a shadow desk holds nothing)")
+        if (self.flat_before_weekend is not None or self.holiday_flats) and self.mode != "live":
+            raise ValueError("desk.flat_before_weekend / holiday_flats apply to a live desk only (a shadow desk holds "
+                             "nothing)")
         return self
 
 

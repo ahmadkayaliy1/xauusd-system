@@ -11,7 +11,9 @@ window ``news_blackout`` / ``news_stale`` (B8: the caller passes :func:`desk_new
 calendar). Open = ``(True, "<window name>")``; with ``desk.windows: []`` (D-052) the desk is open whenever none of the
 other reasons holds = ``(True, "all_day")``.
 
-D-052 (a live desk): :func:`weekend_flat_ms` — this week's ``desk.flat_before_weekend`` instant while it applies.
+D-052 (a live desk): one more closed reason, ``pre_flat`` (from PRE_FLAT_NO_ENTRY_MIN before a flat until it ends);
+:func:`weekend_flat_ms` — the flat in force (this week's ``desk.flat_before_weekend`` or a ``holiday_flats`` date);
+the gate checks the same state at placement (``desk_clock``), so an answer that arrives late cannot open a trade.
 """
 from __future__ import annotations
 
@@ -71,6 +73,9 @@ def desk_window_state(cfg: DeskCfg, now_ms: int, calendar: SessionCalendar, pair
     cut = _local(now_ms, cfg.friday_cutoff.tz)
     if cut.weekday() == 4 and (cut.hour, cut.minute) >= _hm(cfg.friday_cutoff.time):
         return False, "friday_cutoff"
+    if cfg.mode == "live" and (weekend_flat_ms(cfg, now_ms) is not None
+                               or next_flat_ms(cfg, now_ms, PRE_FLAT_NO_ENTRY_MIN * MS_PER_MINUTE) is not None):
+        return False, "pre_flat"                         # D-052: a holiday close ahead (or the flat itself)
     if not cfg.windows:                                  # D-052: no windows = all day (the session is the model's)
         return (False, news) if news else (True, "all_day")
     for w in cfg.windows:
@@ -109,6 +114,7 @@ def last_window_end(cfg: DeskCfg, now_ms: int) -> int:
 
 WEEKEND_FLAT_SPAN_MS = 12 * MS_PER_HOUR     # the flat applies from its Friday time for this long (the rest of Friday)
 WEEKEND_REVIEW_MIN = 30                     # the review call before the flat
+PRE_FLAT_NO_ENTRY_MIN = 90                  # a live desk opens nothing this long before a flat (16:30 → the 15:00 cutoff)
 
 
 def friday_flat_ms(cfg: DeskCfg, now_ms: int) -> int | None:
@@ -123,9 +129,27 @@ def friday_flat_ms(cfg: DeskCfg, now_ms: int) -> int | None:
     return int(dt.datetime(fri.year, fri.month, fri.day, h, m, tzinfo=ZoneInfo(fb.tz)).timestamp() * 1000)
 
 
+def flat_instants(cfg: DeskCfg, now_ms: int) -> list[int]:
+    """Every flat instant of a live desk around ``now``: this week's Friday flat and each ``holiday_flats`` date (the
+    last session before a holiday closure or an early close - the session calendar knows no holidays)."""
+    if cfg.mode != "live":
+        return []
+    out = [t for t in (friday_flat_ms(cfg, now_ms),) if t is not None]
+    for h in cfg.holiday_flats:
+        d, (hh, mm) = dt.date.fromisoformat(h.date), _hm(h.time)
+        out.append(int(dt.datetime(d.year, d.month, d.day, hh, mm, tzinfo=ZoneInfo(h.tz)).timestamp() * 1000))
+    return sorted(out)
+
+
 def weekend_flat_ms(cfg: DeskCfg, now_ms: int) -> int | None:
-    """This Friday's flat instant while ``now`` lies in [it, + WEEKEND_FLAT_SPAN_MS) — the rest of the Friday session —
-    else None. A system that is back only after the weekend reopen does not close what it holds then: the gap the
-    rule protects against is behind it."""
-    at = friday_flat_ms(cfg, now_ms)
-    return at if at is not None and at <= now_ms < at + WEEKEND_FLAT_SPAN_MS else None
+    """The flat in force at ``now`` (the weekend's or a holiday's): its instant while ``now`` lies in [it, +
+    WEEKEND_FLAT_SPAN_MS) — the rest of that session — else None. A system that is back only after the reopen does not
+    close what it holds then: the gap the rule protects against is behind it."""
+    act = [t for t in flat_instants(cfg, now_ms) if t <= now_ms < t + WEEKEND_FLAT_SPAN_MS]
+    return max(act) if act else None
+
+
+def next_flat_ms(cfg: DeskCfg, now_ms: int, within_ms: int) -> int | None:
+    """The next flat instant in (now, now + within_ms], else None."""
+    nxt = [t for t in flat_instants(cfg, now_ms) if now_ms < t <= now_ms + within_ms]
+    return min(nxt) if nxt else None

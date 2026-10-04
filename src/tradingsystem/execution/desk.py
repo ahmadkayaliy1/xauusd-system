@@ -90,7 +90,7 @@ def assert_not_shadow(pairs: frozenset[str], pair: str, what: str) -> None:
 # A desk in ``mode: live`` trades through the ordinary path (none of the above applies to it). What it adds: the weekend
 # flat (a system rule appended to every open trade of the pair from desk.flat_before_weekend on) and two review calls
 # while it holds a trade - before a fomc/high release and before the flat - as executor events the engine wakes on.
-WEEKEND_RULE_NOTE = "desk: flat before the weekend (D-052)"
+WEEKEND_RULE_NOTE = "desk: flat before the weekend / a holiday close (D-052)"
 REVIEW_EVENT = "desk_review"
 
 
@@ -116,7 +116,7 @@ def reviews_due(pcfg: Any, shared_dir: Any, now_ms: int) -> list[tuple[str, str,
     ``weekend`` once in the ``WEEKEND_REVIEW_MIN`` before the weekend flat. ``key`` identifies the occasion (the caller
     sends each one once). Never raises."""
     from ..analysis import news
-    from ..analysis.desk_windows import WEEKEND_REVIEW_MIN, friday_flat_ms
+    from ..analysis.desk_windows import WEEKEND_REVIEW_MIN, friday_flat_ms, next_flat_ms
     from ..core.timeutil import MS_PER_MINUTE, iso
     desk = pcfg.desk
     out: list[tuple[str, str, str]] = []
@@ -131,9 +131,10 @@ def reviews_due(pcfg: Any, shared_dir: Any, now_ms: int) -> list[tuple[str, str,
                     out.append(("news", str(ev.time_ms), f"{tier} release '{ev.title}' at {iso(ev.time_ms)} in "
                                 f"{-(-left // MS_PER_MINUTE)} min: review the open trade before it (D-052)"))
                     break
-        at = friday_flat_ms(desk, now_ms)
-        if at is not None and at - WEEKEND_REVIEW_MIN * MS_PER_MINUTE <= now_ms < at:
-            out.append(("weekend", str(at), f"the desk closes every open trade at {iso(at)} before the weekend (in "
+        at = next_flat_ms(desk, now_ms, WEEKEND_REVIEW_MIN * MS_PER_MINUTE)
+        if at is not None:
+            why = "the weekend" if at == friday_flat_ms(desk, now_ms) else "a holiday / early close"
+            out.append(("weekend", str(at), f"the desk closes every open trade at {iso(at)} before {why} (in "
                         f"{-(-(at - now_ms) // MS_PER_MINUTE)} min): review the open trade (D-052)"))
     except Exception:  # noqa: BLE001 — a review call is a courtesy; the weekend flat itself does not depend on it
         log.exception("desk reviews of %s could not be checked", pcfg)
