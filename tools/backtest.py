@@ -36,6 +36,30 @@ REAL_DATA = ROOT / "data"
 CONFIG = ROOT / "config" / "config.yaml"
 
 
+def baseline_section(s, real: Path, pair: str, trades: list[dict], start: int, end: int) -> dict | None:
+    """The random-entry baseline of the period (tools/desk_report.py B19): a BUY / SELL at each of the run's own stop
+    sizes from every 5-minute close the desk could enter, the real per-bar spread, target 2R - what a random entry
+    at the same stops, hours and costs earned; beside the run's own expectancy."""
+    import importlib.util
+    import math
+    filled = [x for x in trades if x.get("filled") and not x.get("open") and x.get("sl") and x.get("fill")]
+    if not filled:
+        return None
+    spec = importlib.util.spec_from_file_location("ts_tools_desk_report", ROOT / "tools" / "desk_report.py")
+    dr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dr)
+    s_real = s.model_copy(update={"paths": s.paths.model_copy(update={"data_dir": str(real)})})
+    stops = sorted({round(abs(x["fill"] - x["sl"]), 1) for x in filled})
+    days = max(1, math.ceil((end - start) / 86_400_000))
+    b = dr.baseline(s_real, pair, stops, days, end)
+    if b.get("error"):
+        return {"error": b["error"]}
+    rows = [{"stop": abs(x["fill"] - x["sl"]), "decision": x["side"], "r_net": x["r"]} for x in filled]
+    return {"expectancy_r": dr.baseline_for(rows, b), "entries": b.get("entries"), "days": days,
+            "by_stop_side": {k: {"n": v["n"], "expectancy_r": v["expectancy_r"], "tp_first_share": v["tp_first_share"]}
+                             for k, v in (b.get("by_stop_side") or {}).items()}}
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -100,6 +124,20 @@ def main(argv: list[str] | None = None) -> int:
             "answers": a.answers, "source": str(source) if source else None, "equity": a.equity, "news": a.news,
             "max_calls": a.max_calls, "result": result}
     doc = report.write(run_root, s, meta, source)
+    try:
+        base = baseline_section(s, real, rc.pair, doc["trades"], start, end)
+    except Exception as exc:  # noqa: BLE001 - a reference, never a reason to lose the run's report
+        base = {"error": repr(exc)[:200]}
+    if base is not None:
+        doc["baseline"] = base
+        (run_root / "report.json").write_text(json.dumps(doc, indent=1, default=str), encoding="utf-8", newline="\n")
+        with (run_root / "report.md").open("a", encoding="utf-8", newline="\n") as f:
+            f.write("\n## Random-entry baseline (the run's stops and sides, every 5-min close the desk could enter, "
+                    "real spread, target 2R)\n\n")
+            f.write(f"- {base.get('error') or ''}" if base.get("error") else
+                    f"- baseline expectancy at the run's stops/sides: **{base['expectancy_r']} R** (the run: "
+                    f"{doc['summary']['expectancy_r']} R) over {base['entries']} entries in {base['days']} day(s)\n"
+                    f"- by stop/side: {base['by_stop_side']}\n")
     if not a.keep_market:
         for sub in ("hot", "cold"):
             shutil.rmtree(s.paths.data() / sub, ignore_errors=True)
