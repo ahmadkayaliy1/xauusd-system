@@ -199,6 +199,9 @@ def render(meta: dict, tr: list[dict], summ: dict, cl: dict, cal: list[dict] | N
          f"Period {meta['from']} → {meta['to']} · pair {meta['pair']} · answers `{meta['answers']}` · start equity "
          f"${meta['equity']:.2f} · brief `{meta.get('brief')}` · news blackout {'on (archived real calendar)' if meta['news'] else 'OFF'} · "
          f"{meta['result'].get('stopped_by') or 'ran to the end'} · {meta['result'].get('real_s')} s real time.", "",
+         *([f"**INTERRUPTED - not a clean sample** (computer asleep ≈ {meta['result'].get('suspended_s')} s, "
+            f"{meta['result'].get('error_cycles')} cycle(s) without an answer): re-run before using it.", ""]
+           if meta['result'].get('interrupted') else []),
          "Paper execution on the real recorded ticks (bid/ask), the production engine, gate and management on a "
          "simulated clock; the answer of a call reaches the executor after its real latency. Swap added per "
          "rollover held. A small sample proves nothing about an edge.", "",

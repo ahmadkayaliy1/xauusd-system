@@ -36,6 +36,7 @@ from ..core import timeutil
 from ..core.settings import PathsCfg, Settings, load_settings
 from ..core.timeframes import Timeframe
 from ..core.timeutil import MS_PER_MINUTE, iso, parse_date_spec
+from ..supervisor.winops import keep_awake, sample_clock
 from .market import MarketReplay, prepare
 
 log = logging.getLogger("backtest")
@@ -43,6 +44,7 @@ log = logging.getLogger("backtest")
 STEP_MS = 5_000                      # clock step while a position / order is live
 HOUSEKEEPING_MS = 60_000             # virtual outcomes + metrics, as the live executor (every minute)
 SCREEN_SETTLE_MS = 6_000             # the engine screens this long after a 5-minute close (its SETTLE_MS is 5 s)
+SUSPEND_S = 60                       # a wall/monotonic gap larger than this = the computer slept during the run
 DUE_KEY = "bt:due:"                  # engine_kv: when a run's answer reached its executor (replay uses it exactly)
 PROVIDER_WAIT_S = 120                # real seconds to wait for the provider's sign-in check before the clock starts
 
@@ -153,6 +155,8 @@ class Backtest:
         self.real_s = 0.0
         self._news_week: str | None = None
         self._news_at = 0
+        self._clk0 = sample_clock()          # tick (with sleep) - awake (without): grows only while the computer sleeps
+        self.suspended_s = 0.0
 
     # ------------------------------------------------------------------ setup
     def prepare(self) -> dict:
@@ -195,6 +199,7 @@ class Backtest:
         os.environ["TS_NOTIFY_DISABLE"] = "1"
         os.environ["TS_NEWS_NO_FETCH"] = "1"
         timeutil.set_sim_clock(lambda: self.clock)
+        keep_awake(True)                     # no idle sleep while the run goes on (lid / button / battery still can)
         t_real = time.time()
         self.market = MarketReplay(self.s, self.real_data, self.s.paths.data(), self.rc.start_ms)
         self.ex = Executor(self.s)
@@ -242,9 +247,36 @@ class Backtest:
                 self._finish()
             finally:
                 timeutil.set_sim_clock(None)
-        return {"calls": self.calls, "stopped_by": self.stopped_by, "end": iso(self.clock), "real_s": round(self.real_s)}
+                keep_awake(False)
+        errors = self._error_cycles()
+        interrupted = bool(self.suspended_s) or errors > 0
+        return {"calls": self.calls, "stopped_by": self.stopped_by, "end": iso(self.clock), "real_s": round(self.real_s),
+                "suspended_s": round(self.suspended_s), "error_cycles": errors, "interrupted": interrupted}
+
+    def _error_cycles(self) -> int:
+        """Cycles that ended without an answer (a failed or cut-off call) - a run with any is not a clean sample."""
+        try:
+            con = sqlite3.connect(f"file:{(self.s.paths.state() / 'app.db').as_posix()}?mode=ro", uri=True)
+            try:
+                return int(con.execute("SELECT count(*) FROM ai_decisions WHERE status IN ('error','interrupted')")
+                           .fetchone()[0])
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return 0
+
+    def _check_suspend(self) -> None:
+        """A sleep / hibernate of the computer during the run (the supervisor's measure: time since boot with sleep -
+        without sleep grew). A call
+        in flight across it may have failed - the run is marked interrupted (the report says so; the queue re-runs it)."""
+        c = sample_clock()
+        gap = (c.tick - c.awake) - (self._clk0.tick - self._clk0.awake)
+        if gap > SUSPEND_S and gap > self.suspended_s + 1:
+            log.warning("the computer slept for about %.0f s during the run (at %s)", gap - self.suspended_s, iso(self.clock))
+            self.suspended_s = gap
 
     def _to(self, t: int) -> None:
+        self._check_suspend()
         if t > self.clock:
             self.clock = t
             self.market.advance(t)
