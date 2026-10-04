@@ -167,3 +167,35 @@ def test_the_summary_books_swap_and_measures_the_drawdown_on_closed_trades():
     sm = summary(tr, 100.0)
     assert sm["net_usd"] == 9.6 and sm["max_drawdown_pct"] == 10.4 and sm["win_rate"] == 0.5
     assert sm["expectancy_r"] == 0.48 and sm["by_session_r"]["london"]["n"] == 2
+
+
+# ------------------------------------------------------------------------------------------------ news (B5)
+def test_news_weeks_are_new_york_weeks_and_a_missing_one_is_named(tmp_path):
+    from tradingsystem.backtest.runner import missing_news_weeks, ny_week
+    from tradingsystem.core.timeutil import parse_date_spec as p
+    assert ny_week(p("2026-10-04T03:00Z")) == "2026-09-27"                # Saturday 23:00 New York
+    assert ny_week(p("2026-10-04T05:00Z")) == "2026-10-04"                # Sunday 01:00 New York
+    (tmp_path / "2026-09-27.json").write_text("{}", encoding="utf-8")
+    assert missing_news_weeks(tmp_path, p("2026-09-29T00:00Z"), p("2026-10-06T00:00Z")) == ["2026-10-04"]
+
+
+def test_the_run_writes_the_weeks_real_calendar_as_fetched_at_the_clock(tmp_path):
+    import json
+    from tradingsystem.analysis import news
+    from tradingsystem.backtest.runner import Backtest
+    from tradingsystem.core.timeutil import parse_date_spec as p
+    raw = (Path(__file__).resolve().parents[1] / "fixtures" / "real" / "ff_calendar_thisweek_2026-09-29.json").read_bytes()
+    events = news.parse_feed(raw)                                          # the real feed of that week
+    arch = tmp_path / "archive"
+    arch.mkdir()
+    (arch / "2026-09-27.json").write_text(json.dumps({"version": 1, "fetched_ms": 0, "fetched": "", "source_url": "x",
+        "events": [[e.time_ms, e.title, e.country, e.impact] for e in events]}), encoding="utf-8")
+    three = Path(__file__).resolve().parents[1] / "fixtures" / "config_three_pairs.yaml"
+    rc = RunConfig(start_ms=p("2026-09-30T12:00Z"), end_ms=p("2026-09-30T13:00Z"), news=True, news_archive=arch)
+    s = run_settings(three, tmp_path / "run", rc)
+    assert s.pairs["XAUUSD"].news_blackout.enabled
+    bt = Backtest(s, rc, tmp_path / "real", tmp_path / "run")
+    bt.clock = p("2026-09-30T12:20:00Z")                                   # Core PCE at 12:30: inside its window
+    bt._news_sync()
+    st = news.state_now(s.pairs["XAUUSD"].news_blackout, s.paths.shared(), bt.clock)
+    assert st.fresh and st.blocked and "PCE" in st.blackout[1].title

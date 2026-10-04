@@ -43,6 +43,7 @@ log = logging.getLogger("backtest")
 STEP_MS = 5_000                      # clock step while a position / order is live
 HOUSEKEEPING_MS = 60_000             # virtual outcomes + metrics, as the live executor (every minute)
 SCREEN_SETTLE_MS = 6_000             # the engine screens this long after a 5-minute close (its SETTLE_MS is 5 s)
+PROVIDER_WAIT_S = 120                # real seconds to wait for the provider's sign-in check before the clock starts
 
 
 @dataclass
@@ -54,10 +55,25 @@ class RunConfig:
     answers: str = "claude"                  # claude | production | replay
     source: Path | None = None               # app.db of the real system / of an earlier run (production / replay)
     max_calls: int = 150
-    news: bool = False                       # the news blackout needs a historical calendar of the period (B5)
+    news: bool = False                       # the news blackout: the archived real calendar of each week (B5)
+    news_archive: Path | None = None         # <data>/shared/news_archive (news.ARCHIVE_DIR): <NY Sunday>.json
     ai: dict = field(default_factory=lambda: {"daily_calls_per_pair": 60, "min_minutes_between_calls": 15,
                                               "review_floor_minutes": 10, "event_calls_per_day": 12})
     step_ms: int = STEP_MS
+
+
+def ny_week(ms: int) -> str:
+    """The Sunday (New York date) of the week ``ms`` lies in - the news archive's file name (news.Calendar.week)."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    d = dt.datetime.fromtimestamp(ms / 1000, ZoneInfo("America/New_York")).date()
+    return str(d - dt.timedelta(days=(d.weekday() + 1) % 7))
+
+
+def missing_news_weeks(archive: Path, start_ms: int, end_ms: int) -> list[str]:
+    """The New York weeks of [start, end) without an archived calendar (a run with ``news`` refuses them)."""
+    weeks = sorted({ny_week(t) for t in range(start_ms, end_ms, 6 * 3_600_000)} | {ny_week(end_ms - 1)})
+    return [w for w in weeks if not (Path(archive) / f"{w}.json").is_file()]
 
 
 def answer_due(row_ts: int, rec: dict, latency_ms: int) -> int:
@@ -99,6 +115,8 @@ class Backtest:
         self.stopped_by: str | None = None
         self.inject: list[tuple[int, DecisionRecord]] = []
         self.real_s = 0.0
+        self._news_week: str | None = None
+        self._news_at = 0
 
     # ------------------------------------------------------------------ setup
     def prepare(self) -> dict:
@@ -147,6 +165,13 @@ class Backtest:
                     stf = self.eng.screen_tf(pair)
                     self.eng.processed_screen[pair] = stf.floor(self.clock) - stf.ms
                 self.eng._init_event_cursor()
+                # the provider's sign-in check runs in the background at start-up: wait for it (real time) so the
+                # first screens of the period are not lost to "AI provider not ready"
+                t_ready = time.time()
+                while not self.eng.ai_ready() and time.time() - t_ready < PROVIDER_WAIT_S:
+                    await asyncio.sleep(1.0)
+                if not self.eng.ai_ready():
+                    raise RuntimeError(f"the AI provider is not ready: {self.eng._ai_problem}")
             else:
                 self._load_injections()
             last_hk = self.clock
@@ -180,6 +205,22 @@ class Backtest:
         if t > self.clock:
             self.clock = t
             self.market.advance(t)
+            self._news_sync()
+
+    def _news_sync(self) -> None:
+        """B5: with ``news`` the run's calendar file is the archived real calendar of the clock's New York week,
+        written as the live engine's hourly download would have (fetched = the clock)."""
+        if not self.rc.news:
+            return
+        week = ny_week(self.clock)
+        if week == self._news_week and self.clock - self._news_at < 3_600_000:
+            return
+        doc = json.loads((Path(self.rc.news_archive) / f"{week}.json").read_text(encoding="utf-8"))
+        doc.update(fetched_ms=self.clock, fetched=iso(self.clock))
+        dest = self.s.paths.shared() / "news_calendar.json"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
+        self._news_week, self._news_at = week, self.clock
 
     def _busy(self) -> bool:
         return bool(self.ex.paper.watermarks())        # a pending order or an open position of the run

@@ -28,7 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from tradingsystem.backtest import report  # noqa: E402
-from tradingsystem.backtest.runner import Backtest, RunConfig, run_id_for, run_settings  # noqa: E402
+from tradingsystem.backtest.runner import (Backtest, RunConfig, missing_news_weeks, run_id_for,  # noqa: E402
+                                           run_settings)
 from tradingsystem.core.timeutil import iso, parse_date_spec  # noqa: E402
 
 REAL_DATA = ROOT / "data"
@@ -49,7 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--equity", type=float, default=107.38)
     ap.add_argument("--max-calls", type=int, default=150)
     ap.add_argument("--calls-per-day", type=int, default=60)
-    ap.add_argument("--news", action="store_true", help="news blackout on (needs a calendar of the period: B5)")
+    ap.add_argument("--news", action="store_true",
+                    help="news blackout on, from the archived real calendars (data/shared/news_archive/<NY Sunday>.json)")
     ap.add_argument("--run-id")
     ap.add_argument("--keep-market", action="store_true")
     ap.add_argument("--data", default=str(REAL_DATA), help="the real data root (read only); default this checkout's")
@@ -65,13 +67,14 @@ def main(argv: list[str] | None = None) -> int:
                                                   if a.answers == "production" else None)
         if a.answers != "claude" and (source is None or not source.exists()):
             raise ValueError(f"--answers {a.answers} needs an existing --source app.db")
-        if a.news:
-            raise ValueError("--news needs a historical calendar of the period (plan B5) - not built yet")
+        archive = real / "shared" / "news_archive"
+        if a.news and (miss := missing_news_weeks(archive, start, end)):
+            raise ValueError(f"--news: no archived calendar for the New York week(s) {', '.join(miss)} in {archive}")
     except ValueError as exc:
         print(f"backtest: invalid: {exc}", file=sys.stderr)
         return 3
     rc = RunConfig(start_ms=start, end_ms=end, equity=a.equity, answers=a.answers, source=source,
-                   max_calls=a.max_calls, news=a.news)
+                   max_calls=a.max_calls, news=a.news, news_archive=archive)
     rc.ai = {**rc.ai, "daily_calls_per_pair": a.calls_per_day}
     run_id = a.run_id or run_id_for(rc)
     run_root = real / "backtests" / run_id
