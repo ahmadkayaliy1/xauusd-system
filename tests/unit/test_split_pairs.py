@@ -29,7 +29,8 @@ SIBLING = {"BTCUSDT": "ETHUSDT", "ETHUSDT": "BTCUSDT", "XAUUSD": None}
 # D-052 (owner, 2026-10-01): the XAUUSD folder's gold trades on the demo account - what may differ from the three-pair
 # config there, and the exact values
 D052_RISK = {"max_risk_per_trade_pct": 15.0, "max_daily_loss_pct": 30.0, "max_effective_leverage": 60.0,
-             "account_drawdown_stop_pct": 100.0, "max_correlated_risk_pct": 30.0}
+             "account_drawdown_stop_pct": 100.0, "max_correlated_risk_pct": 30.0,
+             "max_losing_trades_per_day": 3}
 D052_MONITOR = {"equity_drop_warn_pct": 15.0, "equity_drop_kill_pct": 35.0, "daily_loss_warn_margin_pct": 5.0}
 
 

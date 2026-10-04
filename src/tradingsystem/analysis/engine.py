@@ -387,6 +387,14 @@ class Engine:
         value seen stands between screens)."""
         desk = self.s.pairs[pair].desk
         news = self._news_state.get(pair)
+        lim = self.s.risk.max_losing_trades_per_day
+        if lim is not None:                                # D-052: the day's loss stop - no entry call until tomorrow
+            day0 = now - now % MS_PER_DAY
+            try:
+                if self.store.losing_trades_since(pair, day0) >= lim:
+                    return True, "loss_stop", f"loss_stop:{day0}"
+            except Exception:  # noqa: BLE001 — the gate refuses such an entry anyway
+                log.exception("%s: the day's losing trades could not be counted", pair)
         if desk is not None:
             ok, why = desk_window_state(desk, now, cal, pair, desk_news_reason(news))
             if not ok or desk.mode != "live":
@@ -440,7 +448,8 @@ class Engine:
                 self._skip_noted[pair] = (key, now)
                 text = {"no_fit": "the minimum lot does not fit the risk / leverage caps (account.min_position_risk"
                                   ".fits_now is false)",
-                        "news_blackout": "inside a scheduled release's news blackout window (B8)"}
+                        "news_blackout": "inside a scheduled release's news blackout window (B8)",
+                        "loss_stop": "the pair's day loss stop (risk.max_losing_trades_per_day losing trades today)"}
                 msg = f"{pair}: {strength} entry call not made - " + text.get(why, f"desk call window closed ({why})")
                 log.info("%s", msg)
                 kind = why if why in text else "outside_desk_window"

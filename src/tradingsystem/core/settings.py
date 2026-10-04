@@ -379,6 +379,9 @@ class RiskCfg(_Model):
     max_spread_to_sl_ratio: float = 0.2
     min_confidence: int = Field(55, ge=50, le=90)     # the gate executes nothing below this confidence
     account_drawdown_stop_pct: float = Field(25.0, gt=0, le=100)   # whole account below its high-water mark (D-039)
+    # D-052 (owner, 2026-10-04): no new entry of a pair after this many losing trades of it in the UTC day (the gate
+    # refuses, the engine makes no entry call; reviews of what is open go on); None = no such stop
+    max_losing_trades_per_day: int | None = Field(None, ge=1, le=20)
     max_recommendation_age_s: int = 300
     max_data_staleness_s: int = 120
     correlated_groups: list[list[str]] = Field(default_factory=lambda: [["BTCUSDT", "ETHUSDT"]])

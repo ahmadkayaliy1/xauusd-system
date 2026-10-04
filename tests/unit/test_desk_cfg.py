@@ -92,7 +92,8 @@ def test_friday_cutoff_and_window_names_are_checked():
 def test_every_risk_field_is_classified_or_deliberately_refused():
     """A new RiskCfg field must be given a tightening direction (or refused) before an instance may override it."""
     unclassified = set(RiskCfg.model_fields) - set(RISK_TIGHTEN)
-    assert unclassified == {"correlated_groups", "allow_high_risk_display"}       # lists / display flags: refused
+    assert unclassified == {"correlated_groups", "allow_high_risk_display",       # lists / display flags: refused
+                            "max_losing_trades_per_day"}   # D-052: the folder config only (None = off), never per instance
     assert set(RISK_TIGHTEN.values()) == {"down", "up"}
 
 
