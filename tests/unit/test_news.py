@@ -71,7 +71,8 @@ def test_what_is_not_a_calendar_is_refused_and_the_previous_file_stays(tmp_path,
     with pytest.raises(ValueError):
         news.fetch(GOLD, news.calendar_path(shared), FETCHED + 3_600_000, opener=opener(raw))
     assert news.calendar_path(shared).read_bytes() == before
-    assert [p.name for p in shared.iterdir()] == [news.FILE_NAME]                 # no temp file left behind
+    assert sorted(p.name for p in shared.iterdir() if p.name != news.ARCHIVE_DIR) == [news.FILE_NAME]   # no temp
+    #                                                                  file left (the weekly archive is P12.7's)
 
 
 def test_the_stored_file_round_trips(tmp_path):
@@ -331,3 +332,13 @@ def test_a_pair_without_a_desk_waits_out_a_blackout_but_ignores_a_stale_file(des
     desk.store.kv_set("BTCUSDT:signature", ["old"])
     tick(desk, NY_PCE + 5 * MIN)
     assert "BTCUSDT" not in desk.rec.dispatched and n_events(desk, "skipped: news_blackout", "BTCUSDT") == 1
+
+
+def test_each_fetch_keeps_the_weeks_copy_in_the_archive(tmp_path):
+    """P12.7: the backtest's real calendar of a past week - the week's latest fetch, one file per New York week."""
+    import json as _json
+    shared = stored(tmp_path)
+    arch = shared / news.ARCHIVE_DIR / "2026-09-27.json"        # the New York week of 2026-09-29 starts on Sunday 09-27
+    assert arch.is_file()
+    assert _json.loads(arch.read_text(encoding="utf-8"))["events"] == \
+        _json.loads(news.calendar_path(shared).read_text(encoding="utf-8"))["events"]

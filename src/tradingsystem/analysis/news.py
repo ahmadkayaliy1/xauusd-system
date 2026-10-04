@@ -38,6 +38,7 @@ from ..core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, iso
 log = logging.getLogger("engine")
 NY = ZoneInfo("America/New_York")
 FILE_NAME = "news_calendar.json"
+ARCHIVE_DIR = "news_archive"                 # P12.7: <shared>/news_archive/<New York week's Sunday>.json
 FILE_VERSION = 1
 FETCH_TIMEOUT_S = 20
 FETCH_RETRY_MS = 15 * MS_PER_MINUTE          # after a failed download (the feed's limit is 2 per 5 minutes)
@@ -161,6 +162,12 @@ def fetch(cfg: NewsBlackoutCfg, dest: Path, now_ms: int, opener=None) -> Calenda
         except OSError:
             pass
         raise
+    try:      # P12.7: the week's latest fetch kept per New York week - the backtest's real calendar of a past week
+        arch = dest.parent / ARCHIVE_DIR / f"{dt.datetime.fromtimestamp(lo / 1000, NY).date()}.json"
+        arch.parent.mkdir(parents=True, exist_ok=True)
+        arch.write_text(json.dumps(doc, separators=(",", ":")), encoding="utf-8")
+    except OSError as exc:                               # never a reason to fail the download itself
+        log.warning("news calendar: the weekly archive copy failed: %r", exc)
     return cal
 
 
