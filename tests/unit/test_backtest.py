@@ -215,3 +215,41 @@ def test_a_management_variant_changes_only_what_it_names():
     assert t["take_profits"] == [{"price": 4130.0, "close_fraction": 1.0, "label": "2R (backtest variant)"}]
     assert [x["trigger"] for x in t["management"]] == ["r_multiple", "minutes_elapsed"]  # no rule on a TP that left
     assert variant({"decision": "NO_TRADE"}, {"tp_r": 2}) == {"decision": "NO_TRADE"}
+
+
+def _chain_tool():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("backtest_chain_under_test",
+                                                  Path(__file__).resolve().parents[2] / "tools" / "backtest_chain.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _report(day: str, trades: list[tuple[str, str, float, float, float]]) -> dict:
+    """One run's report: (fill hh:mm, close hh:mm, fill, sl, pnl usd) per SELL trade of 0.01 lot."""
+    return {"meta": {"run_id": f"r{day}", "from": f"{day}T00:00:00.000Z", "from_ms": 0}, "calls": {},
+            "trades": [{"id": f"t{k}", "filled": True, "open": False, "fill": f, "sl": sl, "volume": 0.01,
+                        "fill_time": f"{day}T{a}:00.000Z", "close_time": f"{day}T{b}:00.000Z", "pnl_usd": p,
+                        "swap_usd": 0.0, "r": p / abs(f - sl)} for k, (a, b, f, sl, p) in enumerate(trades)]}
+
+
+def test_the_chain_rechecks_the_gate_at_the_running_equity():
+    ch = _chain_tool()
+    day1 = _report("2026-09-01", [("01:00", "02:00", 4000.0, 4010.0, -10.0)])        # 10 % of 100: taken, a loss
+    day2 = _report("2026-09-02", [("01:00", "02:00", 4000.0, 4014.0, 20.0)])         # 14 USD = 15.6 % of 90: refused
+    r = ch.chain([day1, day2], 100.0, 15.0, 60.0, 30.0, 3)
+    assert r["end"] == 90.0 and r["trades"] == 1 and len(r["refused"]) == 1 and "15.6" in r["refused"][0][3]
+    r = ch.chain([day1, day2], 120.0, 15.0, 60.0, 30.0, 3)                            # 14 USD = 12.7 % of 110: taken
+    assert r["end"] == 130.0 and r["trades"] == 2 and not r["refused"]
+
+
+def test_the_chain_keeps_the_day_stop_and_the_days_worst_case():
+    ch = _chain_tool()
+    losses = [(f"0{h}:00", f"0{h}:30", 4000.0, 4005.0, -5.0) for h in range(1, 5)]   # the 4th comes after 3 losses
+    r = ch.chain([_report("2026-09-01", losses)], 100.0, 15.0, 60.0, 30.0, 3)
+    assert r["trades"] == 3 and r["refused"][0][3].startswith("day stop")
+    both = [("01:00", "03:00", 4000.0, 4014.0, 5.0), ("02:00", "03:00", 4000.0, 4014.0, 5.0),
+            ("02:30", "03:00", 4000.0, 4010.0, 5.0)]                                  # 14 + 14 + 10 open > 30 % of 100
+    r = ch.chain([_report("2026-09-01", both)], 100.0, 15.0, 60.0, 30.0, 3)
+    assert r["trades"] == 2 and "worst case" in r["refused"][0][3]
