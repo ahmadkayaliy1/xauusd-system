@@ -365,8 +365,14 @@ class Backtest:
             except Exception:  # noqa: BLE001
                 log.exception("engine close failed")
         ex = getattr(self, "ex", None)
-        if ex is not None and ex.paper is not None:
-            ex.paper.close()
+        if ex is not None:                    # every handle on the run's stores: the market copy is deleted after
+            for close in (getattr(ex.paper, "close", None), ex.store.close, ex.appdb.close,
+                          *(r.close for r in getattr(ex, "readers", {}).values())):
+                try:
+                    if close is not None:
+                        close()
+                except Exception:  # noqa: BLE001
+                    log.exception("executor close failed")
 
 
 def default_run_root(real_data: Path, run_id: str) -> Path:

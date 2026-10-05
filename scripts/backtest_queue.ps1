@@ -71,4 +71,7 @@ while ($true) {
     & $py tools/backtest.py --answers claude --max-calls 60 --data $data --run-id $id @rest *>> (Join-Path $bt "$id.out")
     "$(Get-Date -Format o) end $id exit=$LASTEXITCODE (worker $PID)" | Out-File -Append $log -Encoding utf8
     Remove-Item -Force (Join-Path $bt "$id.claim") -ErrorAction SilentlyContinue
+    if ($next -notmatch '--keep-market') {               # safety net: the run's market copy once its process is gone
+        foreach ($sub in 'hot', 'cold') { Remove-Item -Recurse -Force (Join-Path $dir "data\$sub") -ErrorAction SilentlyContinue }
+    }
 }

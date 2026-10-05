@@ -22,6 +22,7 @@ import json
 import logging
 import shutil
 import sys
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -148,9 +149,19 @@ def main(argv: list[str] | None = None) -> int:
                     f"- baseline expectancy at the run's stops/sides: **{base['expectancy_r']} R** (the run: "
                     f"{doc['summary']['expectancy_r']} R) over {base['entries']} entries in {base['days']} day(s)\n"
                     f"- by stop/side: {base['by_stop_side']}\n")
-    if not a.keep_market:
+    if not a.keep_market:                     # the run's market copy (~0.3 GB): never left behind silently
+        import gc
+        gc.collect()                          # drop stray SQLite connections before Windows lets the files go
         for sub in ("hot", "cold"):
-            shutil.rmtree(s.paths.data() / sub, ignore_errors=True)
+            d = s.paths.data() / sub
+            for attempt in range(5):
+                shutil.rmtree(d, ignore_errors=True)
+                if not d.exists():
+                    break
+                time.sleep(2)
+            if d.exists():
+                print(f"  WARNING: the market copy {d} could not be deleted (in use?) - delete it by hand",
+                      file=sys.stderr)
     sm = doc["summary"]
     print(f"  done in {result['real_s']} s real time: {sm['trades']} trades, expectancy {sm['expectancy_r']} R, net "
           f"${sm['net_usd']} ({sm['return_pct']} %), max drawdown {sm['max_drawdown_pct']} %, calls {result['calls']}")
