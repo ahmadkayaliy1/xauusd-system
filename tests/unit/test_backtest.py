@@ -253,3 +253,34 @@ def test_the_chain_keeps_the_day_stop_and_the_days_worst_case():
             ("02:30", "03:00", 4000.0, 4010.0, 5.0)]                                  # 14 + 14 + 10 open > 30 % of 100
     r = ch.chain([_report("2026-09-01", both)], 100.0, 15.0, 60.0, 30.0, 3)
     assert r["trades"] == 2 and "worst case" in r["refused"][0][3]
+
+
+def _whatif_tool():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("backtest_whatif_under_test",
+                                                  Path(__file__).resolve().parents[2] / "tools" / "backtest_whatif.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _Path:
+    """A labelled pure-logic stand-in for the recorded ticks: one (ms, bid, ask) per second, spread 0.2."""
+
+    def __init__(self, bids):
+        self.rows = [(1000 * k, b, round(b + 0.2, 2)) for k, b in enumerate(bids)]
+
+    def walk(self, start_ms, end_ms):
+        return iter([r for r in self.rows if start_ms <= r[0] <= end_ms])
+
+
+def test_the_whatif_bracket_reads_a_sells_levels_on_the_ask_and_moves_to_breakeven_once():
+    w = _whatif_tool()
+    down_then_up = _Path([100.0, 98.0, 95.8, 97.0, 100.5, 104.0])     # SELL 100.2: 1 R = 4 at ask 96.2
+    assert w.bracket(down_then_up, "SELL", 100.2, 104.2, 90.0, 0)[:2] == ("sl", -4.0)
+    res = w.bracket(down_then_up, "SELL", 100.2, 104.2, 90.0, 0, be=(1.0, 99.7))
+    assert res[:2] == ("sl", 0.5)                                       # the ask 100.7 took the breakeven stop
+    straight = _Path([100.0, 97.0, 94.0, 89.0])
+    assert w.bracket(straight, "SELL", 100.2, 104.2, 90.0, 0)[:2] == ("tp", 10.2)
+    assert w.bracket(straight, "BUY", 100.2, 96.0, 110.0, 0)[:2] == ("sl", -4.2)          # a BUY on the bid
+    assert w.bracket(straight, "BUY", 100.2, 80.0, 110.0, 0)[:2] == ("open", -11.2)         # neither: marked
