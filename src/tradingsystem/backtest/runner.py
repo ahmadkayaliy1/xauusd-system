@@ -62,6 +62,7 @@ class RunConfig:
     news: bool = False                       # the news blackout: the archived real calendar of each week (B5)
     news_archive: Path | None = None         # <data>/shared/news_archive (news.ARCHIVE_DIR): <NY Sunday>.json
     brief: str | None = None                 # another desk brief for the run (an A/B of the prompt), e.g. desks/xau_live_b
+    desk_management: str | None = None       # another desk management policy (model | be_2r), e.g. the pre-D-053 model
     mgmt: dict = field(default_factory=dict)  # replay only: a management variant of the stored answers (variant())
     ai: dict = field(default_factory=lambda: {"daily_calls_per_pair": 120, "min_minutes_between_calls": 15,
                                               "review_floor_minutes": 10, "event_calls_per_day": 12})
@@ -133,6 +134,10 @@ def run_settings(config: Path, run_root: Path, rc: RunConfig) -> Settings:
         if pc.desk is None:
             raise ValueError(f"{rc.pair} has no desk: no brief to replace")
         upd["desk"] = pc.desk.model_copy(update={"brief": rc.brief})
+    if rc.desk_management:
+        if pc.desk is None:
+            raise ValueError(f"{rc.pair} has no desk: no management policy to replace")
+        upd["desk"] = upd.get("desk", pc.desk).model_copy(update={"management": rc.desk_management})
     pairs = {**s.pairs, rc.pair: pc.model_copy(update=upd)}
     s = s.model_copy(update={
         "paths": PathsCfg(data_dir=str(run_root / "data"), logs_dir=str(run_root / "logs"), instance=rc.pair),

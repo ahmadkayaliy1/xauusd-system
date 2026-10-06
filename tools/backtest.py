@@ -79,6 +79,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="news blackout on, from the archived real calendars (data/shared/news_archive/<NY Sunday>.json)")
     ap.add_argument("--run-id")
     ap.add_argument("--brief", help="another desk brief for this run (prompt A/B), e.g. desks/xau_live_b")
+    ap.add_argument("--desk-management", choices=("model", "be_2r"),
+                    help="another desk management policy for this run (the pre-D-053 'model' or 'be_2r')")
     ap.add_argument("--mgmt", default="", help="replay/production: a management variant, e.g. be_r=1.5,tp_r=2 (be_r=0: "
                                                "no breakeven)")
     ap.add_argument("--keep-market", action="store_true")
@@ -107,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"backtest: invalid: {exc}", file=sys.stderr)
         return 3
     rc = RunConfig(start_ms=start, end_ms=end, equity=a.equity, answers=a.answers, source=source,
-                   max_calls=a.max_calls, news=a.news, news_archive=archive, brief=a.brief, mgmt=mgmt)
+                   max_calls=a.max_calls, news=a.news, news_archive=archive, brief=a.brief, mgmt=mgmt,
+                   desk_management=a.desk_management)
     rc.ai = {**rc.ai, "daily_calls_per_pair": a.calls_per_day}
     run_id = a.run_id or run_id_for(rc)
     run_root = real / "backtests" / run_id

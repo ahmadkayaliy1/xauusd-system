@@ -297,3 +297,12 @@ def test_the_whatif_bracket_reads_a_sells_levels_on_the_ask_and_moves_to_breakev
     assert w.bracket(straight, "SELL", 100.2, 104.2, 90.0, 0)[:2] == ("tp", 10.2)
     assert w.bracket(straight, "BUY", 100.2, 96.0, 110.0, 0)[:2] == ("sl", -4.2)          # a BUY on the bid
     assert w.bracket(straight, "BUY", 100.2, 80.0, 110.0, 0)[:2] == ("open", -11.2)         # neither: marked
+
+
+def test_a_run_may_use_another_desk_management_policy(tmp_path):
+    three = Path(__file__).resolve().parents[1] / "fixtures" / "config_three_pairs.yaml"
+    rc = RunConfig(start_ms=START, end_ms=START + 3_600_000, brief="desks/xau_live_b", desk_management="model")
+    s = run_settings(three, tmp_path / "run", rc)
+    assert s.pairs["XAUUSD"].desk.management == "model" and s.pairs["XAUUSD"].desk.brief == "desks/xau_live_b"
+    rc = RunConfig(start_ms=START, end_ms=START + 3_600_000, desk_management="be_2r")
+    assert run_settings(three, tmp_path / "run2", rc).pairs["XAUUSD"].desk.management == "be_2r"
