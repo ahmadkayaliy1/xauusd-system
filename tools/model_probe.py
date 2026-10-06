@@ -356,8 +356,8 @@ def _fill(ticks, rec: dict, start_ms: int, until_ms: int):
     ot = (rec.get("order_type") or "MARKET").upper()
     e = rec.get("entry") or {}
     lo, hi = e.get("range_min"), e.get("range_max")
-    px = e.get("price")                  # the executor's rule: a range's near edge (BUY: its top, SELL: its bottom)
-    if px is None and lo is not None:
+    px = e.get("price")                  # the gate's rule (entry_price): a range's near edge first (BUY: its top,
+    if lo is not None:                   # SELL: its bottom), else the price
         px = hi if side == "BUY" else lo
     for ts, bid, ask in ticks.walk(start_ms, until_ms):
         if ot == "MARKET":
@@ -374,14 +374,47 @@ def _fill(ticks, rec: dict, start_ms: int, until_ms: int):
     return None
 
 
-def score(ticks, rec: dict | None, asked_ms: int, latency_ms: int, equity: float) -> dict:
-    """One answer on the recorded ticks: no_trade | refused | not filled | (plain, be2r) USD at 0.01 lot."""
+STOPS_LEVEL = 0.25                   # the venue's stops level in price (25 points)
+SL_ATR_MIN, SL_ATR_MAX = 0.5, 5.0      # risk.sl_atr_min_mult / sl_atr_max_mult
+
+
+def score(ticks, rec: dict | None, asked_ms: int, latency_ms: int, equity: float, atr: float | None = None) -> dict:
+    """One answer on the recorded ticks: no_trade | refused (the gate's price checks at the answer's arrival:
+    pending_price_valid, sl_min/max_distance against the decision-TF ATR, rr >= 1.5, risk <= 15 %) | not filled |
+    (plain, be2r) USD at 0.01 lot. Not modelled: a later cancel by the model, the day's own limits."""
     if not rec or rec.get("decision") not in ("BUY", "SELL"):
         return {"kind": "no_trade", "plain": 0.0, "be2r": 0.0}
     side, sl = rec["decision"], rec.get("stop_loss")
     tps = [t.get("price") for t in rec.get("take_profits") or [] if t.get("price") is not None]
     if sl is None or not tps:
         return {"kind": "refused", "why": "no stop or target", "plain": 0.0, "be2r": 0.0}
+    t0 = asked_ms + int(latency_ms or 0)
+    first = next(iter(ticks.walk(t0, t0 + 3_600_000)), None)
+    if first is None:
+        return {"kind": "not filled", "plain": 0.0, "be2r": 0.0}
+    _, bid0, ask0 = first
+    ot = (rec.get("order_type") or "MARKET").upper()
+    e = rec.get("entry") or {}
+    px = e.get("price")
+    if e.get("range_min") is not None:   # the gate's entry_price: the range's near edge first
+        px = e["range_max"] if side == "BUY" else e["range_min"]
+    if ot != "MARKET":
+        if px is None:
+            return {"kind": "refused", "why": "no entry price", "plain": 0.0, "be2r": 0.0}
+        gap = {"BUY_LIMIT": ask0 - px, "BUY_STOP": px - ask0, "SELL_LIMIT": px - bid0, "SELL_STOP": bid0 - px}.get(ot)
+        if gap is None or gap < STOPS_LEVEL:
+            return {"kind": "refused", "why": "pending_price_valid", "plain": 0.0, "be2r": 0.0}
+    planned = float(px) if ot != "MARKET" else (ask0 if side == "BUY" else bid0)
+    dist = (planned - float(sl)) if side == "BUY" else (float(sl) - planned)
+    if dist <= 0:
+        return {"kind": "refused", "why": "sl_side", "plain": 0.0, "be2r": 0.0}
+    if atr:
+        if dist < max(STOPS_LEVEL + (ask0 - bid0), SL_ATR_MIN * atr):
+            return {"kind": "refused", "why": "sl_min_distance", "plain": 0.0, "be2r": 0.0}
+        if dist > SL_ATR_MAX * atr:
+            return {"kind": "refused", "why": "sl_max_distance", "plain": 0.0, "be2r": 0.0}
+    if abs(float(tps[0]) - planned) / dist < 1.5:
+        return {"kind": "refused", "why": "rr_after_costs", "plain": 0.0, "be2r": 0.0}
     try:
         until = _ms(rec.get("valid_until")) if rec.get("valid_until") else asked_ms + 3_600_000
     except ValueError:
@@ -436,8 +469,16 @@ def evaluate(labels: list[str], moments_name: str = "moments.json") -> None:
     for lab in labels:
         common &= set(answers[lab])
     eqs = {mid: float(moments[mid].get("equity") or 107.38) for mid in common}
+    atrs = {}
+    for mid in common:                                   # the decision-TF ATR the gate measured the stop against
+        try:
+            pl = _payload(moments[mid]) or {}
+            atrs[mid] = float(((pl.get("timeframes") or {}).get("15m") or {}).get("indicators", {}).get("atr14"))
+        except (TypeError, ValueError):
+            atrs[mid] = None
     scored = {lab: {mid: score(ticks, answers[lab][mid].get("recommendation"), answers[lab][mid].get("asked_ms")
-                               or moments[mid]["ts"], answers[lab][mid].get("latency_ms") or 0, eqs[mid])
+                               or moments[mid]["ts"], answers[lab][mid].get("latency_ms") or 0, eqs[mid],
+                               atrs.get(mid))
                     for mid in common} for lab in answers}
     print(f"# Model comparison on {len(common)} identical moments\n")
     print("| label | answers | valid | model calls (ledger) | avg input tokens | avg output tokens | avg cached | "
