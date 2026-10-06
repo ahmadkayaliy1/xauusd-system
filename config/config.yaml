@@ -86,6 +86,7 @@ pairs:
       reopen_grace_min: 60           # [] = entry calls all day, Asia included (the model reads the session)
       friday_cutoff: {time: "15:00", tz: America/New_York}            # no new entry after it on Friday
       flat_before_weekend: {time: "16:30", tz: America/New_York}      # every open trade closed, orders cancelled
+      management: be_2r              # D-053 (owner, 2026-10-06): a fixed bracket - stop and target stay, breakeven at 2R
       holiday_flats:                 # the same flat before a US holiday halt / early close / closure (the session calendar
         - {date: "2026-11-26", time: "12:00", tz: America/New_York}   # knows no holidays). Conservative times (early
         - {date: "2026-11-27", time: "12:00", tz: America/New_York}   # closes are ~13:00-13:45 New York); confirm and
@@ -241,7 +242,8 @@ ai:
   providers:
     claude_code:                       # D-030: Claude on your own Claude subscription via the Claude Code CLI -
       kind: claude_code                # no API key, no per-token bill; shares the plan's 5-hour/weekly limits
-      model: sonnet                    # alias = latest Sonnet (opus = deeper, uses the limits faster)
+      model: claude-sonnet-5           # D-053 (owner, 2026-10-06): pinned - P12.7 (Sonnet 5.5 / Opus 5.5 / Fable 5.1 on the
+                                       # same inputs all did worse with this desk); the "sonnet" alias may move to 5.5
       model_env: CLAUDE_CODE_MODEL
       api_key_env: CLAUDE_CODE_OAUTH_TOKEN   # optional long-lived token (`claude setup-token`); empty = CLI login
       effort: medium
@@ -249,7 +251,7 @@ ai:
       structured_output: prompt        # schema in the prompt, one turn (--json-schema costs ~4-5x: D-035)
       max_concurrency: 2               # two pairs analysed at once (set 1 on 4 GB machines)
       rpm: 4
-      rpd: 120                         # daily cap - keeps limits free for your own interactive use
+      rpd: 160                         # daily cap (D-053: XAUUSD 120 a day + reviews/events) - keeps room for your own use
       timeout_s: 180                  # serialized calls: keep a 3-pair batch within risk.max_recommendation_age_s
     gemini:
       kind: gemini

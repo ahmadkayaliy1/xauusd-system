@@ -100,6 +100,22 @@ def live_desk_pairs(s: Settings) -> frozenset[str]:
     return frozenset(name for name, p in s.pairs.items() if p.desk is not None and p.desk.mode == "live")
 
 
+BE_2R_RULE_NOTE = "D-053 desk policy: breakeven at 2 R (a fixed bracket)"
+
+
+def with_mgmt_policy(decision: dict, policy: str) -> dict:
+    """D-053: ``be_2r`` replaces the trade's own management rules by one - the stop to breakeven once the move reaches
+    2 R (P12.7: on the recorded ticks the plain bracket kept the targets the early stop moves cut). A copy; the stored
+    decision is not changed. ``model``: the decision as it is."""
+    if policy != "be_2r":
+        return decision
+    rule = {"action": "move_sl_to_breakeven", "trigger": "r_multiple", "value": 2.0, "params": {},
+            "note": BE_2R_RULE_NOTE}
+    det = dict(decision.get("execution_detail") or {})
+    det["executed_management"] = [rule]
+    return {**decision, "execution_detail": det}
+
+
 def with_weekend_flat(decision: dict, flat_ms: int) -> dict:
     """``decision`` with the weekend flat appended to its management rules (after the trade's own, so their indices -
     the keys of their stored states - stay): ``close_all`` at ``flat_ms`` (the internal ``at_time`` trigger: met by a

@@ -518,3 +518,12 @@ def test_a_superseded_stop_ends_quietly(live):
         ex.process_actions()
     assert events(ex, "action_rejected") == []                               # no false "refused" wakes the model
     assert ex.store.pending_actions("XAUUSD", 0) == []
+
+
+def test_a_fixed_bracket_desk_refuses_stop_and_target_changes_but_still_closes():
+    v = lambda lg: venue()                                    # noqa: E731
+    for a in (act("modify_sl", value=100.5), act("modify_tp", value=112.0)):
+        p = evaluate(a, [leg()], v, ctx(fixed_bracket=True))[0]
+        assert p.status == "rejected" and "desk_policy" in p.reason
+    assert status(evaluate(act("close", fraction=1.0), [leg()], v, ctx(fixed_bracket=True))) == [("close", "apply")]
+    assert status(evaluate(act("modify_sl", value=100.5), [leg()], v, ctx())) == [("set_sl", "apply")]

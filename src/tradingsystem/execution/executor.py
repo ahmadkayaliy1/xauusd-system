@@ -46,7 +46,7 @@ from .action_gate import ActionContext
 from .action_gate import evaluate as gate_action
 from .backends.paper import PaperBackend, Tick
 from .desk import (RESUME_REVIEW_MS, REVIEW_EVENT, SHADOW_KEY, ShadowGuard, ShadowViolation, assert_not_shadow,
-                   live_desk_pairs, reviews_due, shadow_pairs, with_weekend_flat)
+                   live_desk_pairs, reviews_due, shadow_pairs, with_mgmt_policy, with_weekend_flat)
 from .drawdown import AccountPeak
 from .exposure import live_sides
 from ..analysis.desk_windows import desk_window_state, weekend_flat_ms
@@ -1023,9 +1023,16 @@ class Executor:
             now = now_ms()
             self.manager.manage([self._with_desk_rules(d, now) for d in decisions], now)
 
+    def _fixed_bracket(self, pair: str) -> bool:
+        """D-053: the pair's desk keeps the stop and the target as placed (the model may only close or cancel)."""
+        pcfg = self.s.pairs.get(pair)
+        return pcfg is not None and pcfg.desk is not None and pcfg.desk.management == "be_2r"
+
     def _with_desk_rules(self, d: dict, now: int) -> dict:
         pcfg = self.s.pairs.get(d["pair"])
         desk = pcfg.desk if pcfg is not None else None
+        if desk is not None:
+            d = with_mgmt_policy(d, desk.management)     # D-053: the desk's fixed bracket first, the weekend flat after
         flat = weekend_flat_ms(desk, now) if desk is not None else None
         return with_weekend_flat(d, flat) if flat is not None else d
 
@@ -1183,7 +1190,8 @@ class Executor:
                                 market_open=market_open, cfg=cfg,
                                 applied_today=self.actions.applied_today(pair, "model"),
                                 last_sl_change_ms=self.actions.last_sl_change_ms,
-                                deferred_legs=frozenset(k for k, r in rows.items() if r[0] == "deferred"))
+                                deferred_legs=frozenset(k for k, r in rows.items() if r[0] == "deferred"),
+                                fixed_bracket=self._fixed_bracket(pair))
             to_send = []
             for plan in gate_action(a, legs, self.model_legs.venue, ctx):
                 leg_key = plan.leg.key if plan.leg else "-"

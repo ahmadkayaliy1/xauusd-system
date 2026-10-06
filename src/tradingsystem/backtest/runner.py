@@ -63,7 +63,7 @@ class RunConfig:
     news_archive: Path | None = None         # <data>/shared/news_archive (news.ARCHIVE_DIR): <NY Sunday>.json
     brief: str | None = None                 # another desk brief for the run (an A/B of the prompt), e.g. desks/xau_live_b
     mgmt: dict = field(default_factory=dict)  # replay only: a management variant of the stored answers (variant())
-    ai: dict = field(default_factory=lambda: {"daily_calls_per_pair": 60, "min_minutes_between_calls": 15,
+    ai: dict = field(default_factory=lambda: {"daily_calls_per_pair": 120, "min_minutes_between_calls": 15,
                                               "review_floor_minutes": 10, "event_calls_per_day": 12})
     step_ms: int = STEP_MS
 

@@ -43,6 +43,7 @@ class ActionContext:
     applied_today: int                  # actions already applied for this pair today
     last_sl_change_ms: Callable[[str], int | None]
     deferred_legs: frozenset[str] = frozenset()   # legs whose stop move of this action is already deferred
+    fixed_bracket: bool = False                   # D-053: the desk keeps stop and target as placed (be_2r)
 
 
 @dataclass
@@ -93,6 +94,10 @@ def evaluate(action: dict, legs: list[Leg], venue_for: Callable[[Leg], Venue], c
                     for lg in held]
         return [LegPlan(None, "none", status="rejected", checks=list(base))]
 
+    if ctx.fixed_bracket and op in ("modify_sl", "modify_tp"):
+        return [LegPlan(None, "none", status="rejected", checks=base + [(
+            "desk_policy", False, "a fixed bracket (desk management be_2r, D-053): the stop and the target stay as "
+                                  "placed - the system moves the stop to breakeven at 2 R; close or cancel instead")])]
     if op == "cancel_order":
         return [LegPlan(lg, "cancel", checks=list(base)) for lg in mine]
     if op == "modify_tp":

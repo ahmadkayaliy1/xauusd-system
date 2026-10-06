@@ -146,7 +146,7 @@ def test_a_run_is_paper_only_inside_its_own_root(tmp_path):
     assert s.paths.data() == (tmp_path / "run" / "data").resolve() or s.paths.data() == tmp_path / "run" / "data"
     assert s.paths.state() == s.paths.data() / "instances" / "XAUUSD"
     assert not s.notify.enabled and not s.pairs["XAUUSD"].news_blackout.enabled
-    assert s.ai.daily_calls_per_pair == 60 and s.ai.min_minutes_between_calls == 15
+    assert s.ai.daily_calls_per_pair == 120 and s.ai.min_minutes_between_calls == 15     # production's (D-053)
 
 
 # ------------------------------------------------------------------------------------------------ the report

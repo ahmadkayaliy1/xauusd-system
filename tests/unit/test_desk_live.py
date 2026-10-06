@@ -245,11 +245,12 @@ def test_a_live_desk_with_unknown_holdings_keeps_its_review_calls(desk, monkeypa
 def test_the_live_brief_is_versioned_small_and_says_the_live_rules():
     from tradingsystem.ai.prompts import _read_versioned
     text, name, version = _read_versioned("desks/xau_live.md")
-    assert (name, version) == ("desks/xau_live", 2)          # v2 = the backtested "B" (A-grade only, P12.7)
+    assert (name, version) == ("desks/xau_live", 3)          # v3 = B's entries + the fixed bracket (D-053)
     assert len(text) / 3.6 <= 900                          # ≈ 840 tokens in the cached system prompt
     assert "15:00 New York" in text and "holiday close" in text
     assert "SENT" in text and "15 %" in text and "30 %" in text and "16:30 New York" in text
-    assert "never widen" in text and "NO_TRADE" in text
+    assert "fixed bracket" in text and "breakeven once the move reaches 2R" in text and "NO_TRADE" in text
+    assert "do not move the stop or the target" in text
 
 
 # ------------------------------------------------------------------------------------------------ the review's fixes
@@ -382,3 +383,32 @@ def test_back_after_an_outage_with_a_trade_open_the_desk_asks_for_one_review(tmp
         assert len(review_events(ex)) == 1
     finally:
         ex.paper.close()
+
+
+# ------------------------------------------------------------------------------------- D-053: the fixed bracket
+def test_the_be_2r_policy_replaces_the_trades_own_rules_and_the_weekend_flat_follows():
+    own = [{"action": "trail_structure", "trigger": "candle_close", "value": 4146.0, "params": {}},
+           {"action": "move_sl_to_breakeven", "trigger": "r_multiple", "value": 1.0, "params": {}}]
+    d = {"id": "x", "pair": "XAUUSD", "recommendation": {}, "execution_detail": {"executed_management": own}}
+    out = desk_mod.with_weekend_flat(desk_mod.with_mgmt_policy(d, "be_2r"), 123)
+    assert [(r["action"], r["trigger"], r["value"]) for r in rules_of(out)] == [
+        ("move_sl_to_breakeven", "r_multiple", 2.0), ("close_all", "at_time", 123)]
+    assert d["execution_detail"]["executed_management"] == own          # the stored decision is untouched
+    assert desk_mod.with_mgmt_policy(d, "model") is d
+    assert DeskCfg().management == "model"
+    with pytest.raises(ValidationError):
+        DeskCfg(management="trail")
+
+
+def test_the_executor_applies_the_desks_policy_and_knows_its_fixed_bracket():
+    fixed = SimpleNamespace(s=SimpleNamespace(pairs={"XAUUSD": SimpleNamespace(
+        desk=LIVE.model_copy(update={"management": "be_2r"}))}))
+    own = [{"action": "trail_atr", "trigger": "r_multiple", "value": 1.0, "params": {}}]
+    d = {"id": "x", "pair": "XAUUSD", "recommendation": {}, "execution_detail": {"executed_management": own}}
+    wed = int(dt.datetime(2026, 9, 30, 14, 0, tzinfo=UTC).timestamp() * 1000)          # no flat on a Wednesday
+    out = ex_mod.Executor._with_desk_rules(fixed, d, wed)
+    assert [(r["action"], r["value"]) for r in rules_of(out)] == [("move_sl_to_breakeven", 2.0)]
+    assert ex_mod.Executor._fixed_bracket(fixed, "XAUUSD")
+    model = SimpleNamespace(s=SimpleNamespace(pairs={"XAUUSD": SimpleNamespace(desk=LIVE)}))
+    assert rules_of(ex_mod.Executor._with_desk_rules(model, d, wed)) == own
+    assert not ex_mod.Executor._fixed_bracket(model, "XAUUSD")

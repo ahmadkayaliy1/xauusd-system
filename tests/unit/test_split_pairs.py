@@ -32,6 +32,8 @@ D052_RISK = {"max_risk_per_trade_pct": 15.0, "max_daily_loss_pct": 30.0, "max_ef
              "account_drawdown_stop_pct": 100.0, "max_correlated_risk_pct": 30.0,
              "max_losing_trades_per_day": 3}
 D052_MONITOR = {"equity_drop_warn_pct": 15.0, "equity_drop_kill_pct": 35.0, "daily_loss_warn_margin_pct": 5.0}
+# D-053 (owner, 2026-10-06): the decision model pinned, the provider's daily cap for 120 gold calls a day
+D053_PROVIDER = {"model": "claude-sonnet-5", "rpd": 160}
 
 
 def three(inst: str | None = None):
@@ -248,6 +250,8 @@ def test_this_folders_config_is_one_pair_and_otherwise_the_three_pair_config_unc
             for k in D052_MONITOR:
                 d["monitor"].pop(k)
             d["pairs"].pop("desk")
+            for k in D053_PROVIDER:
+                d["ai"]["providers"]["claude_code"].pop(k)
         return d
 
     d052 = pair == "XAUUSD" and new.pairs[pair].desk is not None and new.pairs[pair].desk.mode == "live"
@@ -257,7 +261,9 @@ def test_this_folders_config_is_one_pair_and_otherwise_the_three_pair_config_unc
         assert {k: getattr(new.monitor, k) for k in D052_MONITOR} == D052_MONITOR
         desk = new.pairs[pair].desk
         assert (desk.brief, desk.windows, desk.friday_cutoff.time, desk.flat_before_weekend.time,
-                desk.pre_news_review_min) == ("desks/xau_live", [], "15:00", "16:30", 15)
+                desk.pre_news_review_min, desk.management) == ("desks/xau_live", [], "15:00", "16:30", 15, "be_2r")
+        prov = new.ai.providers["claude_code"]
+        assert {k: getattr(prov, k) for k in D053_PROVIDER} == D053_PROVIDER
     times = {"XAUUSD": ("04:30", "06:00", "03:30"), "BTCUSDT": ("04:55", "06:45", "03:40"),
              "ETHUSDT": ("05:20", "07:30", "03:50")}[pair]
     assert (new.operator.daily_utc, new.operator.weekly_utc, new.backup.daily_utc) == times

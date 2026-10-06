@@ -5,7 +5,7 @@
     (start it twice for two runs in parallel; a third is refused - the 5-hour plan window and the laptop's RAM)
 .DESCRIPTION
     Reads data\backtests\queue.txt (one run per line: "<run id> <tools/backtest.py arguments>", # = comment); the
-    claude answers and --max-calls 60 are added. A worker claims a run with data\backtests\<id>.claim (its process
+    claude answers and --max-calls 130 are added (D-053: production's 120 calls a day). A worker claims a run with data\backtests\<id>.claim (its process
     id) before it starts it; the other worker skips a run whose claim belongs to a live process. A run with a clean
     report.json is skipped; a run folder without a report whose claim is dead (the PC went off) is removed and run
     again; an interrupted run (the PC slept, failed calls) is kept aside once and run again. While
@@ -68,7 +68,7 @@ while ($true) {
     $parts = $next -split '\s+'
     $id = $parts[0]; $rest = $parts[1..($parts.Length - 1)]
     "$(Get-Date -Format o) start $id (worker $PID)" | Out-File -Append $log -Encoding utf8
-    & $py tools/backtest.py --answers claude --max-calls 60 --data $data --run-id $id @rest *>> (Join-Path $bt "$id.out")
+    & $py tools/backtest.py --answers claude --max-calls 130 --data $data --run-id $id @rest *>> (Join-Path $bt "$id.out")
     "$(Get-Date -Format o) end $id exit=$LASTEXITCODE (worker $PID)" | Out-File -Append $log -Encoding utf8
     Remove-Item -Force (Join-Path $bt "$id.claim") -ErrorAction SilentlyContinue
     if ($next -notmatch '--keep-market') {               # safety net: the run's market copy once its process is gone

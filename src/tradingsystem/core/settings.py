@@ -262,6 +262,10 @@ class DeskCfg(_Model):
     # session calendar knows no holidays); no new entry in the 90 min before any flat
     holiday_flats: list[DeskDateFlatCfg] = Field(default_factory=list)
     pre_news_review_min: int = Field(15, ge=0, le=120)  # live: a review call this long before a fomc/high release (0 = off)
+    # D-053 (owner, 2026-10-06), live: how an open trade is managed. "model" = the answer's own management rules and the
+    # model's stop / target changes; "be_2r" = a fixed bracket - the stop and the target stay as placed, the system moves
+    # the stop to breakeven once the move reaches 2 R; the model may still close the trade or cancel an order (P12.7).
+    management: Literal["model", "be_2r"] = "model"
 
     @model_validator(mode="after")
     def _check(self) -> "DeskCfg":
