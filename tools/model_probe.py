@@ -137,6 +137,129 @@ def select(runs: list[str], *, seed: int = SEED, out_name: str = "moments.json",
 
 
 # ---------------------------------------------------------------------------------------------------------- ask
+def _probe_settings(root: Path, end: int, brief: str, model: str | None, confirmer: str | None = None):
+    """The run settings of a probe root: paper, notifications off, the decision model ``model`` and, for a
+    confirm run, the escalation step on for every trade idea with ``confirmer``."""
+    from tradingsystem.backtest.runner import RunConfig, run_settings
+    rc = RunConfig(start_ms=end, end_ms=end + 1, pair="XAUUSD", brief=brief, ai={"daily_calls_per_pair": 5000})
+    s = run_settings(ROOT / "config" / "config.yaml", root, rc)
+    prov = s.ai.providers["claude_code"].model_copy(update={"rpd": 5000})
+    models = s.ai.models
+    if model:
+        models = models.model_copy(update={"decision": models.decision.model_copy(update={"model": model})})
+    upd = {"providers": {**s.ai.providers, "claude_code": prov}, "models": models}
+    if confirmer:
+        upd["models"] = models.model_copy(update={"escalation": models.escalation.model_copy(
+            update={"model": confirmer, "effort": "medium"})})
+        upd["escalation"] = s.ai.escalation.model_copy(update={
+            "enabled": True, "on_strength": ["strong", "weak", "review", "event", "idle", "close", "manual"],
+            "min_confidence": 0, "max_per_day_per_pair": 100000, "on_failure": "withhold", "timeout_s": 300})
+    return s.model_copy(update={"ai": s.ai.model_copy(update=upd)})
+
+
+def _market(s, label: str, last: int, end: int) -> None:
+    from tradingsystem.backtest.market import prepare
+    hot = s.paths.data() / "hot" / "mt5" / "XAUUSD.db"
+    if hot.exists():                                     # a copy that ends before the last moment is no copy
+        con = sqlite3.connect(f"file:{hot}?mode=ro", uri=True)
+        try:
+            top = con.execute("select max(open_time) from xauusd_candles_5m").fetchone()[0] or 0
+        finally:
+            con.close()
+        if top < last - 4 * 86_400_000:
+            raise RuntimeError(f"{label}: its market copy ends {top} before the last moment {last} - delete "
+                               f"{s.paths.data()} and run again")
+    else:
+        prepare(s, DATA, s.paths.data(), end)            # one market copy as of the day after the last moment
+
+
+def _payload(m: dict) -> dict | None:
+    con = _db(DATA / "backtests" / m["run"])
+    try:
+        z = con.execute("select payload_z from ai_payloads where payload_hash=?", (m["payload_hash"],)).fetchone()
+    finally:
+        con.close()
+    return json.loads(zlib.decompress(z[0])) if z else None
+
+
+async def _engine(s):
+    from tradingsystem.analysis.engine import Engine
+    from tradingsystem.supervisor.winops import keep_awake
+    keep_awake(True)
+    os.environ["TS_NOTIFY_DISABLE"] = "1"
+    os.environ["TS_NEWS_NO_FETCH"] = "1"
+    eng = Engine(s)
+    t0 = time.time()
+    while not eng.ai_ready() and time.time() - t0 < 180:
+        await asyncio.sleep(1.0)
+    if not eng.ai_ready():
+        raise RuntimeError(f"the AI provider is not ready: {eng._ai_problem}")
+    return eng
+
+
+async def _confirm(confirmer: str, label: str, proposer: str, brief: str, moments_name: str) -> None:
+    """The escalation step of production (orchestrator._escalate, the 'escalation' prompt + ``brief``) on the stored
+    trade ideas of the ``proposer`` label: ``confirmer`` confirms each unchanged or downgrades it to NO_TRADE. A
+    moment where the proposer had no trade is written as its NO_TRADE without a call."""
+    from tradingsystem.ai.orchestrator import _dump
+    from tradingsystem.ai.store import DecisionRecord
+    from tradingsystem.core import timeutil
+    from tradingsystem.core.tunables import tunables_of
+
+    moments = json.loads((PROBES / moments_name).read_text(encoding="utf-8"))
+    last = max(m["ts"] for m in moments)
+    src = PROBES / proposer / "answers.jsonl"
+    props = {r["id"]: r for r in (json.loads(x) for x in src.read_text(encoding="utf-8").splitlines() if x.strip())
+             if r["status"] == "valid"}
+    root = PROBES / label
+    root.mkdir(parents=True, exist_ok=True)
+    done_f = root / "answers.jsonl"
+    done = {json.loads(x)["id"] for x in done_f.read_text(encoding="utf-8").splitlines() if x.strip()} \
+        if done_f.exists() else set()
+    todo = [m for m in moments if m["id"] in props and m["id"] not in done]
+    print(f"{label}: {len(todo)} to review ({len(done)} done) - {proposer} proposes, {confirmer} confirms", flush=True)
+    if not todo:
+        return
+    end = (last // 86_400_000 + 1) * 86_400_000
+    s = _probe_settings(root, end, brief, None, confirmer)
+    _market(s, label, last, end)
+    clock = {"t": todo[0]["ts"]}
+    timeutil.set_sim_clock(lambda: clock["t"])
+    eng = await _engine(s)
+    orch = eng.orch
+    for k, m in enumerate(todo, 1):
+        prop = props[m["id"]]
+        rec0 = prop.get("recommendation") or {}
+        row = {"id": m["id"], "label": label, "model": confirmer, "proposer": proposer, "asked_ms": prop["asked_ms"],
+               "latency_ms": prop.get("latency_ms")}
+        if rec0.get("decision") not in ("BUY", "SELL"):
+            row.update(status="valid", recommendation=rec0, verdict="no proposal")
+        else:
+            payload = _payload(m)
+            as_of = _ms(payload["meta"]["as_of"])
+            clock["t"] = as_of
+            reason = m["trigger"] or "probe"
+            tn = tunables_of(orch, "XAUUSD")
+            images, note = await orch.charts_for("XAUUSD", as_of, payload)
+            uv = orch._user_vars("XAUUSD", as_of, reason, _dump(payload), account=payload.get("account"), tn=tn,
+                                 charts_note=note)
+            rec = DecisionRecord("XAUUSD", "agent_per_pair", reason, "valid", recommendation=dict(rec0))
+            rec.trigger_strength = m["strength"] if m["strength"] in s.ai.escalation.on_strength else "review"
+            t1 = time.time()
+            await orch._escalate(rec, "XAUUSD", payload, reason, as_of, payload.get("account") or {}, uv, images,
+                                 setup=m["setup"], tn=tn)
+            errs = " ".join(rec.errors)
+            verdict = ("confirm" if "confirmed" in errs else "downgrade" if "downgraded" in errs else
+                       "failed: " + errs[:200])
+            row.update(status="valid" if not verdict.startswith("failed") else "error",
+                       recommendation=rec.recommendation, verdict=verdict,
+                       review_s=round(time.time() - t1, 1))
+        with done_f.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+        print(f"  [{k}/{len(todo)}] {m['day']} {m['group']}: {row['verdict'][:60]}", flush=True)
+    timeutil.set_sim_clock(None)
+
+
 async def _ask(model: str, label: str, only: str, max_n: int | None, brief: str = "desks/xau_live_b",
                moments_name: str = "moments.json") -> None:
     from tradingsystem.ai.orchestrator import CycleRequest
@@ -286,10 +409,25 @@ def evaluate(labels: list[str], moments_name: str = "moments.json") -> None:
         rows = [json.loads(x) for x in f.read_text(encoding="utf-8").splitlines() if x.strip()] if f.exists() else []
         answers[lab] = {r["id"]: r for r in rows if r["status"] == "valid"}
         ok = [r for r in rows if r["status"] == "valid"]
-        cost[lab] = (len(rows), len(ok), sum(r.get("input_tokens") or 0 for r in ok) / max(1, len(ok)),
-                     sum(r.get("output_tokens") or 0 for r in ok) / max(1, len(ok)),
-                     sum(r.get("latency_ms") or 0 for r in ok) / max(1, len(ok)) / 1000,
-                     sorted({r.get("served_model") for r in ok if r.get("served_model")}))
+        led = PROBES / lab / "data" / "shared" / "ai_usage.db"
+        calls = tin = tout = tcache = lat = 0
+        served = set()
+        if led.exists():
+            con = sqlite3.connect(f"file:{led}?mode=ro", uri=True)
+            try:
+                for n, a, b, c_, l_, mdl in con.execute(
+                        "select count(*), sum(input_tokens), sum(output_tokens), sum(cached_tokens), "
+                        "sum(latency_ms), model from ai_usage group by model"):
+                    calls += n
+                    tin += a or 0
+                    tout += b or 0
+                    tcache += c_ or 0
+                    lat += l_ or 0
+                    served.add(mdl)
+            finally:
+                con.close()
+        cost[lab] = (len(rows), len(ok), calls, tin / max(1, calls), tout / max(1, calls), tcache / max(1, calls),
+                     lat / max(1, calls) / 1000, sorted(x for x in served if x))
     common = set(moments)
     for lab in labels:
         common &= set(answers[lab])
@@ -298,10 +436,12 @@ def evaluate(labels: list[str], moments_name: str = "moments.json") -> None:
                                or moments[mid]["ts"], answers[lab][mid].get("latency_ms") or 0, eqs[mid])
                     for mid in common} for lab in answers}
     print(f"# Model comparison on {len(common)} identical moments\n")
-    print("| model | calls | valid | avg input tokens | avg output tokens | avg latency s | served |")
-    print("|---|---|---|---|---|---|---|")
+    print("| label | answers | valid | model calls (ledger) | avg input tokens | avg output tokens | avg cached | "
+          "avg latency s | served |")
+    print("|---|---|---|---|---|---|---|---|---|")
     for lab, c in cost.items():
-        print(f"| {lab} | {c[0]} | {c[1]} | {c[2]:,.0f} | {c[3]:,.0f} | {c[4]:.0f} | {', '.join(c[5])} |")
+        print(f"| {lab} | {c[0]} | {c[1]} | {c[2]} | {c[3]:,.0f} | {c[4]:,.0f} | {c[5]:,.0f} | {c[6]:.0f} | "
+              f"{', '.join(c[7])} |")
     groups = sorted({moments[m]["group"] for m in common})
     combos = {}
     labs = list(answers)
@@ -395,6 +535,14 @@ def main(argv: list[str]) -> int:
             opts[k] = rest.pop(0)
         asyncio.run(_ask(opts["--model"], opts["--label"], opts["--only"], int(opts["--max"]) if opts["--max"] else None,
                          brief=opts["--brief"], moments_name=opts["--moments"]))
+        return 0
+    if cmd == "confirm":
+        opts = {"--model": None, "--label": None, "--proposer": None, "--brief": "desks/xau_live_b",
+                "--moments": "moments.json"}
+        while rest:
+            k = rest.pop(0)
+            opts[k] = rest.pop(0)
+        asyncio.run(_confirm(opts["--model"], opts["--label"], opts["--proposer"], opts["--brief"], opts["--moments"]))
         return 0
     if cmd == "evaluate":
         labels = [rest[i + 1] for i in range(0, len(rest), 2) if rest[i] == "--label"]
