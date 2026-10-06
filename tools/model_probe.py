@@ -52,7 +52,11 @@ def _db(run: Path) -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------------------------------------------------------- select
-def select(runs: list[str]) -> None:
+def select(runs: list[str], *, seed: int = SEED, out_name: str = "moments.json", exclude: set | None = None,
+           not_filled: int = NOT_FILLED, n_big: int = 15, n_plain: int = 15, settled: bool = True) -> None:
+    """``exclude``: moment ids already used elsewhere (a hold-out set never overlaps them); ``settled`` False
+    leaves out the filled trades (winners / losers / open)."""
+    exclude = exclude or set()
     ticks = Ticks(DATA)
     trades, quiet = [], []
     for name in runs:
@@ -81,6 +85,8 @@ def select(runs: list[str]) -> None:
                  "equity": eq_of.get(ph, 107.38),
                  "trigger": trig, "strength": ts_, "setup": ss, "model": model, "latency_ms": lat,
                  "original": json.loads(rec) if rec else None}
+            if did in exclude:
+                continue
             if dec in ("BUY", "SELL"):
                 t = result.get(did[:8])
                 m["group"] = ("not filled" if not t or not t.get("filled") else
@@ -89,10 +95,12 @@ def select(runs: list[str]) -> None:
                 trades.append(m)
             elif dec == "NO_TRADE":
                 quiet.append(m)
-    rnd = random.Random(SEED)
+    rnd = random.Random(seed)
+    if not settled:
+        trades = [m for m in trades if m["group"] == "not filled"]
     nf = [m for m in trades if m["group"] == "not filled"]
     rnd.shuffle(nf)
-    keep = {m["id"] for m in nf[:NOT_FILLED]}
+    keep = {m["id"] for m in nf[:not_filled]}
     trades = [m for m in trades if m["group"] != "not filled" or m["id"] in keep]
     rnd.shuffle(quiet)
     big, plain, per_day = [], [], defaultdict(int)
@@ -109,33 +117,34 @@ def select(runs: list[str]) -> None:
         if p0 is None:
             continue
         moved = max(hi - p0, p0 - lo)
-        if moved >= MOVE_USD and len(big) < 15:
+        if moved >= MOVE_USD and len(big) < n_big:
             m["group"] = "no trade, big move after"
             big.append(m)
             per_day[m["day"]] += 1
-        elif moved < MOVE_USD and len(plain) < 15:
+        elif moved < MOVE_USD and len(plain) < n_plain:
             m["group"] = "no trade, random"
             plain.append(m)
             per_day[m["day"]] += 1
-        if len(big) >= 15 and len(plain) >= 15:
+        if len(big) >= n_big and len(plain) >= n_plain:
             break
     out = trades + big + plain
     PROBES.mkdir(parents=True, exist_ok=True)
-    (PROBES / "moments.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
+    (PROBES / out_name).write_text(json.dumps(out, indent=1), encoding="utf-8")
     g = defaultdict(int)
     for m in out:
         g[m["group"]] += 1
-    print(f"{len(out)} moments → {PROBES / 'moments.json'}: {dict(g)}")
+    print(f"{len(out)} moments → {PROBES / out_name}: {dict(g)}")
 
 
 # ---------------------------------------------------------------------------------------------------------- ask
-async def _ask(model: str, label: str, only: str, max_n: int | None) -> None:
+async def _ask(model: str, label: str, only: str, max_n: int | None, brief: str = "desks/xau_live_b",
+               moments_name: str = "moments.json") -> None:
     from tradingsystem.ai.orchestrator import CycleRequest
     from tradingsystem.backtest.market import prepare
     from tradingsystem.backtest.runner import RunConfig, run_settings
     from tradingsystem.core import timeutil
 
-    moments = json.loads((PROBES / "moments.json").read_text(encoding="utf-8"))
+    moments = json.loads((PROBES / moments_name).read_text(encoding="utf-8"))
     last = max(m["ts"] for m in moments)                 # the market copy always covers every moment
     if only == "trades":
         moments = [m for m in moments if not m["group"].startswith("no trade")]
@@ -151,7 +160,7 @@ async def _ask(model: str, label: str, only: str, max_n: int | None) -> None:
     if not todo:
         return
     end = (last // 86_400_000 + 1) * 86_400_000
-    rc = RunConfig(start_ms=end, end_ms=end + 1, pair="XAUUSD", brief="desks/xau_live_b",
+    rc = RunConfig(start_ms=end, end_ms=end + 1, pair="XAUUSD", brief=brief,
                    ai={"daily_calls_per_pair": 5000})
     s = run_settings(ROOT / "config" / "config.yaml", root, rc)
     prov = s.ai.providers["claude_code"].model_copy(update={"rpd": 5000})
@@ -218,10 +227,17 @@ def _fill(ticks, rec: dict, start_ms: int, until_ms: int):
     """(fill price, fill ms) of a recommendation's entry, or None (not filled / no entry)."""
     side = rec.get("decision")
     ot = (rec.get("order_type") or "MARKET").upper()
-    px = (rec.get("entry") or {}).get("price")
+    e = rec.get("entry") or {}
+    lo, hi = e.get("range_min"), e.get("range_max")
+    px = e.get("price")                  # the executor's rule: a range's near edge (BUY: its top, SELL: its bottom)
+    if px is None and lo is not None:
+        px = hi if side == "BUY" else lo
     for ts, bid, ask in ticks.walk(start_ms, until_ms):
         if ot == "MARKET":
-            return (ask if side == "BUY" else bid), ts
+            p = ask if side == "BUY" else bid
+            if lo is not None and hi is not None and not (lo <= p <= hi):
+                return None                  # the gate's market_in_zone: the price left the zone while asking
+            return p, ts
         if px is None:
             return None
         if ot == "BUY_LIMIT" and ask <= px or ot == "SELL_LIMIT" and bid >= px:
@@ -259,9 +275,9 @@ def score(ticks, rec: dict | None, asked_ms: int, latency_ms: int, equity: float
     return {"kind": "trade", "side": side, "entry": entry, "plain": plain[1], "be2r": be[1], "res": plain[0]}
 
 
-def evaluate(labels: list[str]) -> None:
+def evaluate(labels: list[str], moments_name: str = "moments.json") -> None:
     ticks = Ticks(DATA)
-    moments = {m["id"]: m for m in json.loads((PROBES / "moments.json").read_text(encoding="utf-8"))}
+    moments = {m["id"]: m for m in json.loads((PROBES / moments_name).read_text(encoding="utf-8"))}
     answers = {"Sonnet 5 (original)": {mid: {"recommendation": m["original"], "asked_ms": m["ts"],
                                               "latency_ms": m["latency_ms"]} for mid, m in moments.items()}}
     cost = {}
@@ -349,18 +365,41 @@ def main(argv: list[str]) -> int:
         return 2
     cmd, rest = argv[0], argv[1:]
     if cmd == "select":
-        select(rest)
+        kw, runs = {}, []
+        while rest:
+            k = rest.pop(0)
+            if k == "--seed":
+                kw["seed"] = int(rest.pop(0))
+            elif k == "--out":
+                kw["out_name"] = rest.pop(0)
+            elif k == "--exclude":
+                kw["exclude"] = {m["id"] for f in rest.pop(0).split(",")
+                                 for m in json.loads((PROBES / f).read_text(encoding="utf-8"))}
+            elif k == "--not-filled":
+                kw["not_filled"] = int(rest.pop(0))
+            elif k == "--big":
+                kw["n_big"] = int(rest.pop(0))
+            elif k == "--random":
+                kw["n_plain"] = int(rest.pop(0))
+            elif k == "--unsettled-only":
+                kw["settled"] = False
+            else:
+                runs.append(k)
+        select(runs, **kw)
         return 0
     if cmd == "ask":
-        opts = {"--model": None, "--label": None, "--only": "all", "--max": None}
+        opts = {"--model": None, "--label": None, "--only": "all", "--max": None, "--brief": "desks/xau_live_b",
+                "--moments": "moments.json"}
         while rest:
             k = rest.pop(0)
             opts[k] = rest.pop(0)
-        asyncio.run(_ask(opts["--model"], opts["--label"], opts["--only"], int(opts["--max"]) if opts["--max"] else None))
+        asyncio.run(_ask(opts["--model"], opts["--label"], opts["--only"], int(opts["--max"]) if opts["--max"] else None,
+                         brief=opts["--brief"], moments_name=opts["--moments"]))
         return 0
     if cmd == "evaluate":
         labels = [rest[i + 1] for i in range(0, len(rest), 2) if rest[i] == "--label"]
-        evaluate(labels)
+        mom = next((rest[i + 1] for i in range(0, len(rest), 2) if rest[i] == "--moments"), "moments.json")
+        evaluate(labels, mom)
         return 0
     print(__doc__)
     return 2
