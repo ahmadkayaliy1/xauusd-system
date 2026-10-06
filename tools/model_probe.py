@@ -228,6 +228,8 @@ async def _confirm(confirmer: str, label: str, proposer: str, brief: str, moment
     eng = await _engine(s)
     orch = eng.orch
     for k, m in enumerate(todo, 1):
+        while (PROBES / "PAUSE").exists():
+            await asyncio.sleep(30)
         prop = props[m["id"]]
         rec0 = prop.get("recommendation") or {}
         row = {"id": m["id"], "label": label, "model": confirmer, "proposer": proposer, "asked_ms": prop["asked_ms"],
@@ -316,6 +318,8 @@ async def _ask(model: str, label: str, only: str, max_n: int | None, brief: str 
     if not eng.ai_ready():
         raise RuntimeError(f"the AI provider is not ready: {eng._ai_problem}")
     for k, m in enumerate(todo, 1):
+        while (PROBES / "PAUSE").exists():             # the owner's plan window: no new call while paused
+            await asyncio.sleep(30)
         src = DATA / "backtests" / m["run"]
         con = _db(src)
         try:
