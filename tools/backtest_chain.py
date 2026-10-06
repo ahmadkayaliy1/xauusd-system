@@ -12,6 +12,7 @@ history of the earlier days, a position still open at a run's end is left out, a
 from __future__ import annotations
 
 import json
+import math
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,7 +29,10 @@ def _day(ms: int) -> str:
 
 
 def chain(reports: list[dict], equity: float, max_risk: float, max_lev: float, daily: float,
-          losses: int) -> dict:
+          losses: int, sizing: str = "fixed", base: float = 100.0) -> dict:
+    """``sizing``: ``fixed`` = every trade 0.01 lot (what the runs did); ``step`` = 0.01 lot per whole ``base`` USD of
+    equity at the entry (the same risk % as 0.01 lot at ``base``, in the broker's 0.01 steps); ``cont`` = the ideal
+    fractional version of ``step`` (an upper reference - the broker has no lot below 0.01)."""
     trades, open_left, refusals = [], [], 0
     for d in reports:
         refusals += sum((d.get("calls") or {}).get("gate_rejections", {}).values()) \
@@ -46,6 +50,7 @@ def chain(reports: list[dict], equity: float, max_risk: float, max_lev: float, d
     eq, peak, max_dd = equity, equity, 0.0
     day, day_open, day_real, day_losses = None, equity, 0.0, 0
     live: dict[int, dict] = {}
+    results: dict[int, float] = {}
     taken, refused, by_day, curve = [], [], {}, [("start", round(equity, 2))]
     for ts, kind, i in events:
         t = trades[i]
@@ -54,8 +59,8 @@ def chain(reports: list[dict], equity: float, max_risk: float, max_lev: float, d
         if kind == 0:                                     # a close
             if i not in live:
                 continue
-            live.pop(i)
-            res = t["pnl_usd"] + t.get("swap_usd", 0.0)
+            res = (t["pnl_usd"] + t.get("swap_usd", 0.0)) * live.pop(i)["mult"]
+            results[i] = res
             eq += res
             day_real += res
             day_losses += res < 0
@@ -64,14 +69,18 @@ def chain(reports: list[dict], equity: float, max_risk: float, max_lev: float, d
             max_dd = max(max_dd, (peak - eq) / peak * 100 if peak > 0 else 0.0)
             curve.append((t["close_time"][:16], round(eq, 2)))
             continue
-        risk = abs(t["fill"] - t["sl"]) * 100 * t["volume"]
+        mult = 1.0 if sizing == "fixed" else (max(1.0, math.floor(eq / base + 1e-9)) if sizing == "step"
+                                              else max(eq, 0.0) / base)
+        risk = abs(t["fill"] - t["sl"]) * 100 * t["volume"] * mult
         why = None
         if eq <= 0:
             why = "no equity"
         elif risk / eq * 100 > max_risk:
             why = f"1 oz risks {risk / eq * 100:.1f} % > {max_risk:g} %"
-        elif t["fill"] * 100 * t["volume"] / eq > max_lev:
-            why = f"leverage {t['fill'] * 100 * t['volume'] / eq:.0f}x > {max_lev:g}x"
+        elif t["fill"] * 100 * t["volume"] * mult / eq > max_lev:
+            why = f"leverage {t['fill'] * 100 * t['volume'] * mult / eq:.0f}x > {max_lev:g}x"
+        elif any(x["side"] == t["side"] for x in live.values()):
+            why = f"a {t['side']} of the pair is still open (no_same_direction)"
         elif day_losses >= losses:
             why = f"day stop ({losses} losing trades)"
         elif (max(0.0, -day_real) + sum(x["risk"] for x in live.values()) + risk) / day_open * 100 > daily:
@@ -79,16 +88,20 @@ def chain(reports: list[dict], equity: float, max_risk: float, max_lev: float, d
         if why:
             refused.append((t["run"], t["id"], t["fill_time"][:16], why, t["pnl_usd"]))
             continue
-        live[i] = {"risk": risk}
+        live[i] = {"risk": risk, "mult": mult, "side": t["side"]}
         taken.append(t)
     wins = sum(1 for t in taken if t["pnl_usd"] + t.get("swap_usd", 0.0) > 0)
+    for k, t in enumerate(trades):
+        if k in results:
+            t["chain_usd"] = results[k]
     days = sorted(by_day.items())
     return {"start": equity, "end": round(eq, 2), "return_pct": round((eq / equity - 1) * 100, 1),
             "trades": len(taken), "wins": wins, "win_rate": round(wins / len(taken), 3) if taken else None,
             "total_r": round(sum(t["r"] for t in taken), 2), "max_dd_pct": round(max_dd, 1),
             "best_day": max(days, key=lambda x: x[1]) if days else None,
             "worst_day": min(days, key=lambda x: x[1]) if days else None,
-            "days": days, "refused": refused, "open_left": open_left, "run_refusals": refusals, "curve": curve}
+            "days": days, "refused": refused, "open_left": open_left, "run_refusals": refusals, "curve": curve,
+            "taken": taken}
 
 
 def main(argv: list[str]) -> int:
@@ -97,7 +110,8 @@ def main(argv: list[str]) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
-    opts = {"--equity": 100.0, "--max-risk": 15.0, "--max-leverage": 60.0, "--daily": 30.0, "--losses": 3}
+    opts = {"--equity": 100.0, "--max-risk": 15.0, "--max-leverage": 60.0, "--daily": 30.0, "--losses": 3,
+            "--sizing": "fixed"}
     data, runs = ROOT / "data", []
     while argv:
         a = argv.pop(0)
@@ -121,7 +135,7 @@ def main(argv: list[str]) -> int:
         print("two runs of the same day - pass one run per day", file=sys.stderr)
         return 2
     r = chain(reports, opts["--equity"], opts["--max-risk"], opts["--max-leverage"], opts["--daily"],
-              opts["--losses"])
+              opts["--losses"], sizing=opts["--sizing"], base=opts["--equity"])
     print(f"# One account over {len(reports)} days ({seen[0]} … {seen[-1]})\n")
     print(f"- start {r['start']:.2f} USD → end **{r['end']:.2f} USD** ({r['return_pct']:+.1f} %)")
     print(f"- trades {r['trades']}, won {r['wins']} ({(r['win_rate'] or 0) * 100:.0f} %), total {r['total_r']:+.2f} R")

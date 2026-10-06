@@ -226,12 +226,14 @@ def _chain_tool():
     return mod
 
 
-def _report(day: str, trades: list[tuple[str, str, float, float, float]]) -> dict:
-    """One run's report: (fill hh:mm, close hh:mm, fill, sl, pnl usd) per SELL trade of 0.01 lot."""
+def _report(day: str, trades: list[tuple]) -> dict:
+    """One run's report: (fill hh:mm, close hh:mm, fill, sl, pnl usd[, side]) per trade of 0.01 lot (a SELL unless
+    named)."""
     return {"meta": {"run_id": f"r{day}", "from": f"{day}T00:00:00.000Z", "from_ms": 0}, "calls": {},
-            "trades": [{"id": f"t{k}", "filled": True, "open": False, "fill": f, "sl": sl, "volume": 0.01,
-                        "fill_time": f"{day}T{a}:00.000Z", "close_time": f"{day}T{b}:00.000Z", "pnl_usd": p,
-                        "swap_usd": 0.0, "r": p / abs(f - sl)} for k, (a, b, f, sl, p) in enumerate(trades)]}
+            "trades": [{"id": f"t{k}", "filled": True, "open": False, "fill": x[2], "sl": x[3], "volume": 0.01,
+                        "side": x[5] if len(x) > 5 else "SELL", "fill_time": f"{day}T{x[0]}:00.000Z",
+                        "close_time": f"{day}T{x[1]}:00.000Z", "pnl_usd": x[4], "swap_usd": 0.0,
+                        "r": x[4] / abs(x[2] - x[3])} for k, x in enumerate(trades)]}
 
 
 def test_the_chain_rechecks_the_gate_at_the_running_equity():
@@ -249,10 +251,21 @@ def test_the_chain_keeps_the_day_stop_and_the_days_worst_case():
     losses = [(f"0{h}:00", f"0{h}:30", 4000.0, 4005.0, -5.0) for h in range(1, 5)]   # the 4th comes after 3 losses
     r = ch.chain([_report("2026-09-01", losses)], 100.0, 15.0, 60.0, 30.0, 3)
     assert r["trades"] == 3 and r["refused"][0][3].startswith("day stop")
-    both = [("01:00", "03:00", 4000.0, 4014.0, 5.0), ("02:00", "03:00", 4000.0, 4014.0, 5.0),
-            ("02:30", "03:00", 4000.0, 4010.0, 5.0)]                                  # 14 + 14 + 10 open > 30 % of 100
-    r = ch.chain([_report("2026-09-01", both)], 100.0, 15.0, 60.0, 30.0, 3)
+    worst = [("01:00", "01:30", 4000.0, 4014.0, -14.0), ("02:00", "03:00", 4000.0, 3990.0, 5.0, "BUY"),
+             ("02:30", "03:00", 4000.0, 4010.0, 5.0)]                       # 14 lost + 10 + 10 open > 30 % of 100
+    r = ch.chain([_report("2026-09-01", worst)], 100.0, 15.0, 60.0, 30.0, 3)
     assert r["trades"] == 2 and "worst case" in r["refused"][0][3]
+
+
+def test_the_chain_refuses_a_second_trade_of_the_same_side_and_sizes_by_equity():
+    ch = _chain_tool()
+    two = [("01:00", "03:00", 4000.0, 4005.0, 5.0), ("02:00", "02:30", 4000.0, 4005.0, 5.0)]
+    r = ch.chain([_report("2026-09-01", two)], 100.0, 15.0, 60.0, 30.0, 3)
+    assert r["trades"] == 1 and "no_same_direction" in r["refused"][0][3]
+    wins = [("01:00", "01:30", 4000.0, 4005.0, 50.0), ("02:00", "02:30", 4000.0, 4005.0, 50.0),
+            ("03:00", "03:30", 4000.0, 4005.0, 50.0)]                      # 100 → 150 → 200, then 0.02 lot
+    assert ch.chain([_report("2026-09-01", wins)], 100.0, 15.0, 60.0, 30.0, 3, sizing="step")["end"] == 300.0
+    assert ch.chain([_report("2026-09-01", wins)], 100.0, 15.0, 60.0, 30.0, 3)["end"] == 250.0
 
 
 def _whatif_tool():
