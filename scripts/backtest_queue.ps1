@@ -25,6 +25,16 @@ if ($others.Count -ge $MaxWorkers) { Write-Host "already $($others.Count) queue 
 $env:PYTHONPATH = Join-Path $root 'src'
 Set-Location $root
 
+function Online {
+    # api.anthropic.com resolves and answers on 443 - else every call of a run would fail (2026-10-06: hours lost)
+    try {
+        $c = New-Object System.Net.Sockets.TcpClient
+        $ok = $c.ConnectAsync('api.anthropic.com', 443).Wait(5000) -and $c.Connected
+        $c.Close()
+        return $ok
+    } catch { return $false }
+}
+
 function Alive($claim) {
     if (-not (Test-Path $claim)) { return $false }
     $p = (Get-Content $claim -ErrorAction SilentlyContinue | Select-Object -First 1)
@@ -65,12 +75,29 @@ while ($true) {
     }
     if (-not $next) { "$(Get-Date -Format o) worker $PID - queue empty" | Out-File -Append $log -Encoding utf8; break }
     while (Test-Path (Join-Path $bt 'PAUSE')) { Start-Sleep -Seconds 30 }
+    if (-not (Online)) {
+        "$(Get-Date -Format o) worker $PID - no internet (api.anthropic.com:443) - waiting" | Out-File -Append $log -Encoding utf8
+        while (-not (Online)) { Start-Sleep -Seconds 60 }
+        "$(Get-Date -Format o) worker $PID - internet back" | Out-File -Append $log -Encoding utf8
+    }
     $parts = $next -split '\s+'
     $id = $parts[0]; $rest = $parts[1..($parts.Length - 1)]
     "$(Get-Date -Format o) start $id (worker $PID)" | Out-File -Append $log -Encoding utf8
     & $py tools/backtest.py --answers claude --max-calls 130 --data $data --run-id $id @rest *>> (Join-Path $bt "$id.out")
     "$(Get-Date -Format o) end $id exit=$LASTEXITCODE (worker $PID)" | Out-File -Append $log -Encoding utf8
     Remove-Item -Force (Join-Path $bt "$id.claim") -ErrorAction SilentlyContinue
+    $rep = Join-Path $dir 'report.json'
+    if (Test-Path $rep) {
+        $j = Get-Content $rep -Raw | ConvertFrom-Json
+        if ($j.meta.result.stopped_by -eq 'ai errors') {        # its calls kept failing: no sample - run it again
+            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+            Remove-Item -Force (Join-Path $bt "retried_$id") -ErrorAction SilentlyContinue
+            "$(Get-Date -Format o) $id stopped by failed calls (network/provider) - removed, it runs again" |
+                Out-File -Append $log -Encoding utf8
+            Start-Sleep -Seconds 60
+            continue
+        }
+    }
     if ($next -notmatch '--keep-market') {               # safety net: the run's market copy once its process is gone
         foreach ($sub in 'hot', 'cold') { Remove-Item -Recurse -Force (Join-Path $dir "data\$sub") -ErrorAction SilentlyContinue }
     }

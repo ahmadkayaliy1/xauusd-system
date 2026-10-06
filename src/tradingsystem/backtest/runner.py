@@ -45,6 +45,7 @@ STEP_MS = 5_000                      # clock step while a position / order is li
 HOUSEKEEPING_MS = 60_000             # virtual outcomes + metrics, as the live executor (every minute)
 SCREEN_SETTLE_MS = 6_000             # the engine screens this long after a 5-minute close (its SETTLE_MS is 5 s)
 MAX_ERROR_CYCLES = 2                 # a slow / failed call happens live too; more than this = not a clean run
+AI_ERRORS = "ai errors"                 # stopped_by of a run whose calls kept failing (the queue runs it again)
 SUSPEND_S = 60                       # a wall/monotonic gap larger than this = the computer slept during the run
 DUE_KEY = "bt:due:"                  # engine_kv: when a run's answer reached its executor (replay uses it exactly)
 PROVIDER_WAIT_S = 120                # real seconds to wait for the provider's sign-in check before the clock starts
@@ -247,6 +248,9 @@ class Backtest:
                     break
                 if self.eng is not None:
                     await self._engine_tick()
+                    if self._error_cycles() > MAX_ERROR_CYCLES:   # the network / the provider is down: not a sample
+                        self.stopped_by = AI_ERRORS
+                        log.warning("more than %d failed calls - the run stops (%s)", MAX_ERROR_CYCLES, iso(self.clock))
         finally:
             self.real_s = time.time() - t_real
             try:
