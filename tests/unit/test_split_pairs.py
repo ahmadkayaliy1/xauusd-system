@@ -261,7 +261,7 @@ def test_this_folders_config_is_one_pair_and_otherwise_the_three_pair_config_unc
         assert {k: getattr(new.monitor, k) for k in D052_MONITOR} == D052_MONITOR
         desk = new.pairs[pair].desk
         assert (desk.brief, desk.windows, desk.friday_cutoff.time, desk.flat_before_weekend.time,
-                desk.pre_news_review_min, desk.management) == ("desks/xau_live", [], "15:00", "16:30", 15, "be_2r")
+                desk.pre_news_review_min, desk.management) == ("desks/xau_live", [], "15:00", "16:30", 15, "model")
         prov = new.ai.providers["claude_code"]
         assert {k: getattr(prov, k) for k in D053_PROVIDER} == D053_PROVIDER
     times = {"XAUUSD": ("04:30", "06:00", "03:30"), "BTCUSDT": ("04:55", "06:45", "03:40"),

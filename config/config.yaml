@@ -86,7 +86,7 @@ pairs:
       reopen_grace_min: 60           # [] = entry calls all day, Asia included (the model reads the session)
       friday_cutoff: {time: "15:00", tz: America/New_York}            # no new entry after it on Friday
       flat_before_weekend: {time: "16:30", tz: America/New_York}      # every open trade closed, orders cancelled
-      management: be_2r              # D-053 (owner, 2026-10-06): a fixed bracket - stop and target stay, breakeven at 2R
+      management: model              # D-054 (owner, 2026-10-07): back to the model's management (be_2r lost in August)
       holiday_flats:                 # the same flat before a US holiday halt / early close / closure (the session calendar
         - {date: "2026-11-26", time: "12:00", tz: America/New_York}   # knows no holidays). Conservative times (early
         - {date: "2026-11-27", time: "12:00", tz: America/New_York}   # closes are ~13:00-13:45 New York); confirm and
