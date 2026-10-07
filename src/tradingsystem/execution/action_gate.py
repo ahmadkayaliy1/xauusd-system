@@ -5,7 +5,8 @@ pending orders, the *legs*). Every action is checked here, deterministically, be
 
 * ownership and freshness: the legs belong to this system and pair; the decision is younger than
   ``risk.max_recommendation_age_s``; the quote is fresh and the market open;
-* ``modify_sl``: only TIGHTER than the current stop and on the protective side of the price; a tighter stop that is
+* ``modify_sl``: only TIGHTER than the current stop (a ``profit_only`` desk, D-055: only to the fill or beyond it,
+  never from a loss to a smaller loss) and on the protective side of the price; a tighter stop that is
   still closer to the price than the venue's stops level + spread is *deferred* — kept and retried every loop until
   it fits or the leg closes (also when the price crosses it meanwhile, the market closes or the decision ages) —
   never loosened, never removed;
@@ -44,6 +45,7 @@ class ActionContext:
     last_sl_change_ms: Callable[[str], int | None]
     deferred_legs: frozenset[str] = frozenset()   # legs whose stop move of this action is already deferred
     fixed_bracket: bool = False                   # D-053: the desk keeps stop and target as placed (be_2r)
+    profit_only: bool = False                     # D-055: a stop moves only to the fill (breakeven) or into profit
 
 
 @dataclass
@@ -134,6 +136,13 @@ def _plan_sl(lg: Leg, sl: float, v: Venue, base: list, ctx: ActionContext) -> Le
     cur = lg.sl
     tighter = cur is None or (sl > cur if buy else sl < cur)
     checks.append(("tighter_only", tighter, f"new stop {sl} vs current {cur} ({'must be higher' if buy else 'must be lower'})"))
+    if ctx.profit_only and lg.fill is not None:          # D-055: from a loss only to breakeven or into profit
+        in_profit = sl >= lg.fill if buy else sl <= lg.fill
+        checks.append(("profit_only", in_profit, f"new stop {sl} vs the fill {lg.fill}: a stop moves only to breakeven "
+                                                 f"or into profit - keep it, or close the trade"))
+        if not in_profit:
+            p.status = "rejected"                        # final: a stop on the losing side never moves
+            return p
     price = v.bid if buy else v.ask                      # a BUY's stop triggers on the bid, a SELL's on the ask
     side_ok = sl < price if buy else sl > price
     checks.append(("protective_side", side_ok, f"stop {sl} {'below' if buy else 'above'} the {'bid' if buy else 'ask'} {price}"))

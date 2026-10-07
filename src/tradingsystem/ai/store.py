@@ -73,6 +73,8 @@ EXECUTION_STATES = ("not_executed", "queued", "executing", "executed", "rejected
 # 'interrupted' (Phase 5 A5): no answer because the machine slept during the cycle — like 'error' it consumes nothing
 # (setup, events, review stay unseen), unlike it the engine does not back off for it
 STATUSES = ("valid", "invalid", "refused", "budget_blocked", "error", "skipped", "interrupted")
+# D-055, the desk's trade journal: the window, at most this many trades, the reason text kept, the lessons shown
+JOURNAL_HOURS, JOURNAL_TRADES, JOURNAL_REASON_CHARS, JOURNAL_LESSONS = 24, 6, 140, 5
 
 
 def git_sha() -> str | None:
@@ -414,6 +416,110 @@ class DecisionStore:
             | ({"mean_r": round(sum(rs) / len(rs), 2)} if rs else {}),
             "broker": {"closed": len(closed), "pnl_usd": round(sum(r[4] or 0.0 for r in closed), 2)} if closed else {},
         }
+
+    def journal(self, pair: str, as_of: int, hours: int = JOURNAL_HOURS) -> dict[str, Any]:
+        """D-055, the desk's trade journal for the snapshot: the executed trades of ``pair`` placed in the last
+        ``hours`` up to ``as_of`` (at most JOURNAL_TRADES, oldest first) - fill, original stop and target, every applied
+        stop change and close (time, from → to, by the model or a rule, why), how it ended (``close_ms`` lets the
+        snapshot add the price after it), the model's own ``trade_review`` of it; today's (UTC) closed trades and
+        lessons. Prices are the execution instrument's. ``{}`` when nothing traded."""
+        since = as_of - hours * 3_600_000
+        day0 = as_of - as_of % MS_PER_DAY
+        with self._lock:
+            rows = self._con.execute(
+                "SELECT id, ts, decision, order_type, execution_detail, outcome, outcome_ts, outcome_pnl_usd, "
+                "outcome_detail FROM ai_decisions WHERE pair=? AND execution_state='executed' AND ts>=? AND ts<=? "
+                "ORDER BY ts DESC LIMIT ?", (pair, since, as_of, JOURNAL_TRADES)).fetchall()[::-1]
+            if not rows:
+                return {}
+            reviews = self._con.execute(
+                "SELECT json_extract(recommendation, '$.trade_review') FROM ai_decisions WHERE pair=? AND "
+                "status='valid' AND ts>=? AND ts<=? AND json_extract(recommendation, '$.trade_review') IS NOT NULL "
+                "ORDER BY ts", (pair, since, as_of)).fetchall()
+            ids = [r[0] for r in rows]
+            q = ",".join("?" * len(ids))
+            try:
+                acts = self._con.execute(
+                    f"SELECT ts, source, source_decision, target_decision, action, requested, status FROM "
+                    f"position_actions WHERE ts<=? AND (target_decision IN ({q}) OR (source='rule' AND "
+                    f"source_decision IN ({q}))) ORDER BY ts, id", (as_of, *ids, *ids)).fetchall()
+            except sqlite3.OperationalError:                     # no executor has written to this database yet
+                acts = []
+            try:                                                 # the paper account's fills (backtests, paper mode)
+                fills = dict(self._con.execute(
+                    f"SELECT decision_id, min(fill_price) FROM paper_legs WHERE decision_id IN ({q}) AND "
+                    f"fill_price IS NOT NULL AND fill_ms<=? GROUP BY decision_id", (*ids, as_of)).fetchall())
+            except sqlite3.OperationalError:
+                fills = {}
+        review: dict[str, dict] = {}
+        for (rv,) in reviews:                                    # the latest review of a trade wins
+            r = _loads(rv)
+            if isinstance(r, dict) and r.get("decision"):
+                review[str(r["decision"])[:8]] = {k: r[k] for k in ("cause", "lesson", "idea_alive", "re_entry")
+                                                  if r.get(k) not in (None, "")}
+        trades, closed_today = [], []
+        for did, ts, side, ot, ex_j, outc, out_ts, pnl, od_j in rows:
+            ex, od = _loads(ex_j) or {}, _loads(od_j) or {}
+            lv = ex.get("executed_levels") or {}
+            stop0, tps = lv.get("stop_loss"), lv.get("take_profits") or []
+            target = tps[0] if tps else None
+            legs = [x for x in (od.get("legs") or []) if isinstance(x, dict)]
+            bk = ex.get("backend") if isinstance(ex.get("backend"), dict) else {}
+            placed = [x for x in (bk.get("placed") or []) if isinstance(x, dict)]
+            fill = next((x["fill_price"] for x in legs if x.get("fill_price") is not None), None)
+            if fill is None:
+                fill = fills.get(did)
+            if fill is None and ot == "MARKET" and placed:
+                fill = placed[0].get("price")
+            t: dict[str, Any] = {"decision": did[:8], "side": side, "order_type": ot, "placed": _iso(ts),
+                                 "entry": fill if fill is not None else lv.get("entry"), "filled": int(fill is not None),
+                                 "stop": stop0, "target": target}
+            sl_now, changes, refused = stop0, [], 0
+            for a_ts, src, sd, td, act, req_j, st in acts:
+                if (sd if src == "rule" else td) != did:
+                    continue
+                rq = _loads(req_j) or {}
+                why = (rq.get("reason") or rq.get("rule") or "")[:JOURNAL_REASON_CHARS]
+                if act in ("modify_sl", "set_sl"):
+                    if st == "rejected" and src == "model":
+                        refused += 1
+                    elif st == "applied" and rq.get("value") is not None:
+                        changes.append({"at": _iso(a_ts), "stop": [sl_now, rq["value"]], "by": src, "why": why})
+                        sl_now = rq["value"]
+                elif st == "applied":
+                    changes.append({"at": _iso(a_ts), "action": act, "by": src, "why": why})
+            if changes:
+                t["changes"] = changes
+            if refused:
+                t["stop_changes_refused"] = refused
+            if out_ts is not None and int(out_ts) > as_of:       # settled after the cycle time: not known yet
+                outc = None
+            if outc in ("closed_profit", "closed_loss", "closed_breakeven"):
+                reason = next((x["reason"] for x in legs if x.get("reason")), None) or "other"
+                exit_px = next((x["close_price"] for x in legs if x.get("close_price") is not None), None)
+                if exit_px is None:                              # settled before the close price was recorded
+                    exit_px = sl_now if reason == "sl" else target if reason == "tp" else None
+                close_ms = int(od.get("close_ms") or out_ts or ts)
+                t.update({"status": "closed", "closed": _iso(close_ms), "close_ms": close_ms, "exit": reason,
+                          "exit_price": exit_px, "pnl_usd": pnl})
+                if fill is not None and stop0 is not None and exit_px is not None and abs(fill - stop0) > 0:
+                    t["r"] = round(((exit_px - fill) if side == "BUY" else (fill - exit_px)) / abs(fill - stop0), 2)
+                if close_ms >= day0:
+                    closed_today.append(t)
+            else:
+                t["status"] = outc or ("open" if fill is not None else "pending")
+            if did[:8] in review:
+                t["review"] = review[did[:8]]
+            trades.append(t)
+        out: dict[str, Any] = {"trades": trades}
+        if closed_today:
+            out["today"] = {"closed": len(closed_today),
+                            "losses": sum((x.get("pnl_usd") or 0.0) < 0 for x in closed_today),
+                            "pnl_usd": round(sum(x.get("pnl_usd") or 0.0 for x in closed_today), 2)}
+        lessons = [v["lesson"] for v in review.values() if v.get("lesson")]
+        if lessons:
+            out["lessons"] = lessons[-JOURNAL_LESSONS:]
+        return out
 
     def last_decision(self, pair: str) -> dict | None:
         with self._lock:

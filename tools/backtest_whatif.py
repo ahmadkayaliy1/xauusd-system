@@ -9,6 +9,12 @@ B. The entry stop wider by Y: every filled trade as a plain bracket (its entry s
    management), Y = 0, 1, 2, 3, 5 USD per oz - the wins, losses and USD of each, and how many a wider stop would have
    pushed past the 15 % gate at the run's equity.
 C. The plain bracket with only a breakeven rule (the stop to entry +- 0.5 once the move reaches 1, 1.5 or 2 R).
+D. Stop moves only to breakeven or into profit (D-055 candidate): every stop change of the run (the model's and the
+   rules') replayed in time order, a change that leaves the stop on the losing side of the fill skipped; after the
+   trade's real close the declared breakeven rule still applies (trailing is not replayed after it).
+E. A MARKET idea the gate refused only because the touch was outside its entry zone on the BETTER side (a SELL above
+   the zone, a BUY below it): filled at that touch, its stop and first target, its declared breakeven rule.
+``--only D,E`` prints those sections only.
 
 A SELL's stop and target trigger on the ask, a BUY's on the bid (the paper backend's rule); the exit price is the
 level itself (no slippage)."""
@@ -130,6 +136,176 @@ def _rule_actions(run: Path) -> dict[str, list[dict]]:
     return out
 
 
+BE_BUFFER = 0.3            # the breakeven stop: the fill +- about the spread (the position manager's buffer)
+
+
+def _db(run: Path) -> sqlite3.Connection | None:
+    db = run / "data" / "instances" / "XAUUSD" / "app.db"
+    return sqlite3.connect(f"file:{db}?mode=ro", uri=True) if db.exists() else None
+
+
+def _stop_events(run: Path) -> dict[str, list[tuple[int, str, float | None]]]:
+    """Every applied stop change or close of the run by trade (8-char id): (ts, 'sl' | 'close', value)."""
+    out: dict[str, list[tuple[int, str, float | None]]] = {}
+    c = _db(run)
+    if c is None:
+        return out
+    try:
+        for ts, src, sd, act, req in c.execute("select ts, source, source_decision, action, requested from "
+                                               "position_actions where status='applied' order by ts"):
+            rq = json.loads(req or "{}")
+            tgt = (sd or "")[:8] if src == "rule" else ((rq.get("target") or {}).get("decision") or "")[:8]
+            if act in ("modify_sl", "set_sl") and rq.get("value") is not None:
+                out.setdefault(tgt, []).append((ts, "sl", float(rq["value"])))
+            elif act == "close":
+                out.setdefault(tgt, []).append((ts, "close", None))
+    finally:
+        c.close()
+    return out
+
+
+def _declared_be(run: Path) -> dict[str, float]:
+    """The R multiple of each executed decision's own breakeven rule (8-char id → R)."""
+    out: dict[str, float] = {}
+    c = _db(run)
+    if c is None:
+        return out
+    try:
+        for did, det in c.execute("select id, execution_detail from ai_decisions where execution_state='executed'"):
+            for m in (json.loads(det or "{}").get("executed_management") or []):
+                if m.get("action") == "move_sl_to_breakeven" and m.get("trigger") == "r_multiple":
+                    out[did[:8]] = float(m.get("value") or 1.0)
+    finally:
+        c.close()
+    return out
+
+
+def replay(ticks, side: str, entry: float, stop: float, target: float | None, start_ms: int,
+           events: list[tuple[int, str, float | None]], *, profit_only: bool, after_ms: int | None = None,
+           be_r: float | None = None, horizon_ms: int = HORIZON_MS) -> tuple[str, float, int, int]:
+    """The trade from its fill with its recorded stop changes / closes applied at their times (``profit_only``: a
+    change that leaves the stop on the losing side of the fill is skipped); from ``after_ms`` (the real close) on, the
+    declared breakeven rule ``be_r`` still fires. → (tp | sl | close | open, USD per oz, at ms, changes skipped)."""
+    sell = side == "SELL"
+    risk = abs(entry - stop)
+    evs = sorted(events)
+    i = skipped = 0
+    last = None
+    be_level = entry - BE_BUFFER if sell else entry + BE_BUFFER
+    for ts, bid, ask in ticks.walk(start_ms, start_ms + horizon_ms):
+        while i < len(evs) and evs[i][0] <= ts:
+            _, kind, v = evs[i]
+            i += 1
+            if kind == "close":
+                return "close", round((entry - ask) if sell else (bid - entry), 2), ts, skipped
+            if profit_only and ((v > entry) if sell else (v < entry)):
+                skipped += 1
+                continue
+            if (v < stop) if sell else (v > stop):
+                stop = v
+        px = ask if sell else bid
+        last = (ts, px)
+        if (px >= stop) if sell else (px <= stop):
+            return "sl", round((entry - stop) if sell else (stop - entry), 2), ts, skipped
+        if target is not None and ((px <= target) if sell else (px >= target)):
+            return "tp", round((entry - target) if sell else (target - entry), 2), ts, skipped
+        if (be_r and after_ms is not None and ts >= after_ms and risk > 0
+                and ((entry - px) if sell else (px - entry)) >= be_r * risk
+                and ((be_level < stop) if sell else (be_level > stop))):
+            stop = be_level
+    if last is None:
+        return "open", 0.0, start_ms, skipped
+    return "open", round((entry - last[1]) if sell else (last[1] - entry), 2), last[0], skipped
+
+
+def section_d(ticks, runs: list[Path]) -> None:
+    print("## D. Stop moves only to breakeven or into profit (a loss-side stop change skipped)\n")
+    print("| run | trade | filled | side | skipped moves | actual USD | replay as run | profit-only: result | USD | diff |")
+    print("|---|---|---|---|---|---|---|---|---|---|")
+    by_month: dict[str, list[float]] = {}
+    for run in runs:
+        rep = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        evs, bes = _stop_events(run), _declared_be(run)
+        for t in rep["trades"]:
+            if not t.get("filled") or t.get("open"):
+                continue
+            side, entry, sl0 = t["side"], t["fill"], t["sl"]
+            tp = (t.get("tps") or [None])[0]
+            mine = evs.get(t["id"], [])
+            loss_side = [e for e in mine if e[1] == "sl" and ((e[2] > entry) if side == "SELL" else (e[2] < entry))]
+            month = t["fill_time"][:7]
+            row = by_month.setdefault(month, [0.0, 0.0, 0, 0])
+            row[0] += t["pnl_usd"]
+            if not loss_side:
+                row[1] += t["pnl_usd"]
+                continue
+            t_in, t_out = _ms(t["fill_time"]), _ms(t["close_time"])
+            same = replay(ticks, side, entry, sl0, tp, t_in, mine, profit_only=False)
+            res, usd, _, sk = replay(ticks, side, entry, sl0, tp, t_in, mine, profit_only=True, after_ms=t_out,
+                                     be_r=bes.get(t["id"]))
+            row[1] += usd
+            row[2] += 1
+            row[3] += res == "tp"
+            print(f"| {run.name} | {t['id']} | {t['fill_time'][5:16]} | {side} | {sk} | {t['pnl_usd']:+.2f} | "
+                  f"{same[0]} {same[1]:+.2f} | {res} | {usd:+.2f} | {usd - t['pnl_usd']:+.2f} |")
+    print("\n| month | trades changed | of which reach the target | actual USD | profit-only USD | diff |")
+    print("|---|---|---|---|---|---|")
+    for m, (a, w, n, tp_n) in sorted(by_month.items()):
+        print(f"| {m} | {n} | {tp_n} | {a:+.2f} | {w:+.2f} | {w - a:+.2f} |")
+    print()
+
+
+def section_e(ticks, runs: list[Path]) -> None:
+    print("## E. MARKET ideas refused only for a touch outside the zone on the better side, filled at that touch\n")
+    print("| run | idea | at | side | zone | touch | beyond | stop | target | result | USD |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    worse = 0
+    by_month: dict[str, list[float]] = {}
+    for run in runs:
+        c = _db(run)
+        if c is None:
+            continue
+        try:
+            rows = c.execute("select id, ts, latency_ms, recommendation, execution_detail from ai_decisions "
+                             "where execution_state='rejected' order by ts").fetchall()
+        finally:
+            c.close()
+        for did, ts, lat, rec_j, det_j in rows:
+            gate = (json.loads(det_j or "{}").get("gate")) or []
+            failed = [g for g in gate if not g.get("ok")]
+            if [g["check"] for g in failed] != ["market_in_zone"]:
+                continue
+            m = re.search(r"touch (-?[\d.]+) vs zone (-?[\d.]+)-(-?[\d.]+)", failed[0].get("detail") or "")
+            if not m:
+                continue
+            px, lo, hi = (float(x) for x in m.groups())
+            rec = json.loads(rec_j or "{}")
+            side = rec.get("decision")
+            better = px > hi if side == "SELL" else px < lo
+            if not better:
+                worse += 1
+                continue
+            sl = float(rec["stop_loss"])
+            tp = (rec.get("take_profits") or [{}])[0].get("price")
+            be_r = next((float(x.get("value") or 1.0) for x in rec.get("management") or []
+                         if x.get("action") == "move_sl_to_breakeven" and x.get("trigger") == "r_multiple"), None)
+            start = int(ts) + int(lat or 0)
+            res, usd, _, _ = replay(ticks, side, px, sl, tp, start, [], profit_only=False, after_ms=start, be_r=be_r)
+            month = datetime.fromtimestamp(start / 1000, timezone.utc).strftime("%Y-%m")
+            row = by_month.setdefault(month, [0, 0, 0.0])
+            row[0] += 1
+            row[1] += res == "tp"
+            row[2] += usd
+            print(f"| {run.name} | {did[:8]} | {datetime.fromtimestamp(start / 1000, timezone.utc):%m-%d %H:%M} | "
+                  f"{side} | {lo}-{hi} | {px} | {abs(px - (hi if side == 'SELL' else lo)):.2f} | {sl} | {tp} | "
+                  f"{res} | {usd:+.2f} |")
+    print("\n| month | ideas | reach the target | USD |")
+    print("|---|---|---|---|")
+    for mo, (n, w, u) in sorted(by_month.items()):
+        print(f"| {mo} | {n} | {w} | {u:+.2f} |")
+    print(f"\n(refused for a touch outside the zone on the WORSE side, left refused: {worse})\n")
+
+
 def main(argv: list[str]) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -137,9 +313,22 @@ def main(argv: list[str]) -> int:
         except (AttributeError, ValueError):
             pass
     data = ROOT / "data"
-    if argv[:1] == ["--data"]:
-        data, argv = Path(argv[1]), argv[2:]
+    only = None
+    while argv[:1] in (["--data"], ["--only"]):
+        if argv[0] == "--data":
+            data = Path(argv[1])
+        else:
+            only = set(argv[1].upper().split(","))
+        argv = argv[2:]
     ticks = Ticks(data)
+    if only:
+        runs = [Path(a) if Path(a).is_dir() else data / "backtests" / a for a in argv]
+        runs = [r for r in runs if (r / "report.json").exists()]
+        if "D" in only:
+            section_d(ticks, runs)
+        if "E" in only:
+            section_e(ticks, runs)
+        return 0
     a_rows, b_tot = [], {y: {"tp": 0, "sl": 0, "open": 0, "usd": 0.0, "gate": 0} for y in WIDER}
     c_tot = {r: {"tp": 0, "sl": 0, "open": 0, "usd": 0.0, "be": 0} for r in BE_AT}
     for arg in argv:

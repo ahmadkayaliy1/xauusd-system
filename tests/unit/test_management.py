@@ -1072,3 +1072,17 @@ def test_a_structure_trail_waits_for_the_swing_of_the_bar_just_closed(tmp_path, 
     market.lo = 102.0                                               # the bar is stored a second later
     pm.manage([decision(rules)], 10 * MIN + 1_000)
     assert [c[0] for c in sim.calls] == ["set_sl"] and sim.legs["d:2"].sl > 98.0
+
+
+def test_a_profit_only_desk_trails_only_once_the_stop_reaches_breakeven():
+    # D-055: the BUY filled at 100.0 with its stop at 95.0 - a trail target below the fill waits (bar_done)
+    import dataclasses
+    r = [rule("trail_atr", "r_multiple", 0.5, atr_mult=1.5)]
+    legs = [pos(fill=100.0, sl=95.0)]
+    v = venue(104.0, 104.2)
+    [p] = plans(r, legs, v, dataclasses.replace(ctx(atr=3.0, sl0=95.0), profit_only=True))   # 104 - 4.5 = 99.5
+    assert p.status == "bar_done" and "losing side" in p.reason
+    [p] = plans(r, legs, v, ctx(atr=3.0, sl0=95.0))                                         # a tighter desk moves it
+    assert (p.status, p.value) == ("apply", 99.5)
+    [p] = plans(r, legs, v, dataclasses.replace(ctx(atr=2.5, sl0=95.0), profit_only=True))   # 104 - 3.75 = 100.25
+    assert (p.status, p.value) == ("apply", 100.25)

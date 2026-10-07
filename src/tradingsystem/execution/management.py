@@ -136,6 +136,7 @@ class RuleContext:
     rule_state: Callable[[str, int, str], dict | None] = lambda decision_id, rule_idx, leg: None
     decision_bar_close: float | None = None          # close of that bar (candle_close triggers)
     decision_tf_ms: int | None = None                # its length (a close counts only after the fill)
+    profit_only: bool = False                        # D-055: a trailing stop moves only to the fill or beyond it
 
 
 @dataclass
@@ -174,6 +175,19 @@ def tighter(side: str, new: float, current: float | None) -> bool:
     if current is None:
         return True
     return new > current + EPS if side == "BUY" else new < current - EPS
+
+
+def profit_only_stops(s: Settings, pair: str) -> bool:
+    """D-055: the pair's desk moves a stop only to the fill (breakeven) or into profit (``desk.sl_moves``)."""
+    pcfg = s.pairs.get(pair)
+    return pcfg is not None and pcfg.desk is not None and pcfg.desk.sl_moves == "profit_only"
+
+
+def loss_side(side: str, stop: float, fill: float | None) -> bool:
+    """True when ``stop`` would still close the trade at a loss (a BUY's below its fill, a SELL's above it)."""
+    if fill is None:
+        return False
+    return stop < fill - EPS if side == "BUY" else stop > fill + EPS
 
 
 def exit_price(leg: Leg, v: Venue) -> float:
@@ -316,6 +330,10 @@ def _stop_plan(base: dict, leg: Leg, v: Venue, target: float, label: str, runnin
     if not tighter(leg.side, target, cur):
         return PlannedAction(**base, action="set_sl", value=target, status="bar_done" if trailing else "skipped",
                              reason=f"{why} → {label} is not tighter than the current stop {cur}")
+    if trailing and ctx.profit_only and loss_side(leg.side, target, leg.fill):
+        return PlannedAction(**base, action="set_sl", value=target, status="bar_done",
+                             reason=f"{why} → {label} is still on the losing side of the fill {leg.fill}: "
+                                    f"the stop moves only to breakeven or into profit (D-055)")
     if trailing and cur is not None and abs(target - cur) < ctx.cfg.min_sl_change_ticks * v.tick_size - EPS:
         return PlannedAction(**base, action="set_sl", value=target, status="bar_done",
                              reason=f"{why} → {label}: move {abs(target - cur):.5g} < "
@@ -915,7 +933,8 @@ class PositionManager:
                                                                        pair),
                            atr=atr, swing_low=lo, swing_high=hi, original_sl=float(sl0) if sl0 is not None else None,
                            cfg=self.cfg, rule_state=state, decision_bar_close=close,
-                           decision_tf_ms=pcfg.decision_timeframe.ms if pcfg else None)
+                           decision_tf_ms=pcfg.decision_timeframe.ms if pcfg else None,
+                           profit_only=profit_only_stops(self.s, pair))
 
     def _announce(self, ev: str, lg: Leg) -> None:
         base = {"pair": lg.pair, "decision": lg.decision_id, "leg": lg.key, "tp_index": lg.tp_index, "side": lg.side,

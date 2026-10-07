@@ -65,6 +65,37 @@ def _mid(q: dict | None) -> float | None:
         return None
 
 
+def journal_block(journal: dict, frames: dict[str, Frame], basis: float | None, d: int) -> dict:
+    """D-055: the store's trade journal with, for every closed trade, the price after its close - the high and low of
+    the closed candles opened since (the finest of 1m / 5m / 15m that reaches back to the close; candle prices, bid
+    for MT5) and the last close, in the journal's (execution) prices - and whether the ORIGINAL stop or the target
+    was reached after it. Only closed candles up to the cycle time: nothing from the future."""
+    out = {**journal, "trades": []}
+    shift = float(basis or 0.0)
+    for t in journal.get("trades") or []:
+        t = dict(t)
+        close_ms = t.pop("close_ms", None)
+        if close_ms is not None:
+            for tf in ("1m", "5m", "15m"):
+                fr = frames.get(tf)
+                if fr is None or not len(fr) or float(fr.open_time[0]) > close_ms:
+                    continue                                     # empty, or it starts after the close
+                k = int(np.searchsorted(fr.open_time, close_ms, side="left"))
+                if k >= len(fr):
+                    break                                        # no candle has closed since: nothing to add yet
+                hi, lo = float(np.max(fr.high[k:])) + shift, float(np.min(fr.low[k:])) + shift
+                ac = {"high": _r(hi, d), "low": _r(lo, d), "last": _r(float(fr.close[-1]) + shift, d), "candles": tf}
+                sell, stop, target = t.get("side") == "SELL", t.get("stop"), t.get("target")
+                if stop is not None:
+                    ac["original_stop_hit"] = int(hi >= stop if sell else lo <= stop)
+                if target is not None:
+                    ac["target_hit"] = int(lo <= target if sell else hi >= target)
+                t["after_close"] = ac
+                break
+        out["trades"].append(t)
+    return out
+
+
 def _r(x, d: int):
     if x is None:
         return None
@@ -330,7 +361,7 @@ class SnapshotBuilder:
     # ------------------------------------------------------------------ public
     def build(self, pair: str, as_of: int, *, account: dict | None = None, history: list[dict] | None = None,
               timeframes: list[str] | None = None, memory: dict | None = None,
-              performance: dict | None = None) -> dict:
+              performance: dict | None = None, journal: dict | None = None) -> dict:
         pcfg = self.s.pairs[pair]
         primary = self.reg.primary(pair)
         execu = self.reg.with_role(pair, "execution")[0]
@@ -385,6 +416,8 @@ class SnapshotBuilder:
             "memory": memory or {},
             "performance": performance or {},
         }
+        if journal:                                         # D-055: a live desk's trade journal (absent = none kept)
+            payload["journal"] = journal_block(journal, frames, market.get("basis_exec_minus_analysis"), d)
         self._session_blocks(payload, pair, primary, cal, exec_cal, frames.get("15m"), per_tf.get("15m"), as_of, pcfg, d,
                              dec_atr, news_st)
         payload["meta"]["data_warnings"] = [

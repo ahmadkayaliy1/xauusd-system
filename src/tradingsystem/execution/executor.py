@@ -50,7 +50,7 @@ from .desk import (RESUME_REVIEW_MS, REVIEW_EVENT, SHADOW_KEY, ShadowGuard, Shad
 from .drawdown import AccountPeak
 from .exposure import live_sides
 from ..analysis.desk_windows import desk_window_state, weekend_flat_ms
-from .management import ActionLog, MT5Legs, PaperLegs, PositionManager
+from .management import ActionLog, MT5Legs, PaperLegs, PositionManager, profit_only_stops
 from .metrics import VIRTUAL_HORIZON_MS, MetricsJob, mt5_outcome_detail, paper_outcome_detail, virtual_valid_until
 from ..core.tunables import Tunables
 from .price_mapping import check_basis, translate
@@ -1191,7 +1191,7 @@ class Executor:
                                 applied_today=self.actions.applied_today(pair, "model"),
                                 last_sl_change_ms=self.actions.last_sl_change_ms,
                                 deferred_legs=frozenset(k for k, r in rows.items() if r[0] == "deferred"),
-                                fixed_bracket=self._fixed_bracket(pair))
+                                fixed_bracket=self._fixed_bracket(pair), profit_only=profit_only_stops(self.s, pair))
             to_send = []
             for plan in gate_action(a, legs, self.model_legs.venue, ctx):
                 leg_key = plan.leg.key if plan.leg else "-"

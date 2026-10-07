@@ -527,3 +527,18 @@ def test_a_fixed_bracket_desk_refuses_stop_and_target_changes_but_still_closes()
         assert p.status == "rejected" and "desk_policy" in p.reason
     assert status(evaluate(act("close", fraction=1.0), [leg()], v, ctx(fixed_bracket=True))) == [("close", "apply")]
     assert status(evaluate(act("modify_sl", value=100.5), [leg()], v, ctx())) == [("set_sl", "apply")]
+
+
+def test_a_profit_only_desk_moves_a_stop_only_to_breakeven_or_into_profit():
+    # D-055: the BUY filled at 100.0 with its stop at 95.0, the bid at 104.0
+    v = lambda lg: venue()                                    # noqa: E731
+    p = evaluate(act("modify_sl", value=98.0), [leg()], v, ctx(profit_only=True))[0]      # a loss -> a smaller loss
+    assert p.status == "rejected" and "profit_only" in p.reason
+    assert status(evaluate(act("modify_sl", value=100.0), [leg()], v, ctx(profit_only=True))) == [("set_sl", "apply")]
+    assert status(evaluate(act("modify_sl", value=101.5), [leg()], v, ctx(profit_only=True))) == [("set_sl", "apply")]
+    assert status(evaluate(act("modify_sl", value=98.0), [leg()], v, ctx())) == [("set_sl", "apply")]   # tighter desk
+    sell = leg(side="SELL", fill=100.0, sl=105.0, tp=90.0)                                 # the 2026-10-07 live case
+    sv = lambda lg: venue(bid=97.0, ask=97.2)                 # noqa: E731
+    p = evaluate(act("modify_sl", value=102.0), [sell], sv, ctx(profit_only=True))[0]
+    assert p.status == "rejected" and "profit_only" in p.reason
+    assert status(evaluate(act("modify_sl", value=99.5), [sell], sv, ctx(profit_only=True))) == [("set_sl", "apply")]

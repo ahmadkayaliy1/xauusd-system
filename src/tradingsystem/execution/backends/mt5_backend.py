@@ -624,6 +624,7 @@ class MT5Backend:
             exits.append({"leg": str(pid), "comment": getattr(opener, "comment", None),
                           "tp_index": _tp_index(getattr(opener, "comment", "")), "filled": True,
                           "reason": deal_reason.get(getattr(last, "reason", None), "other"),
+                          "fill_price": round(p_in, 5), "close_price": round(p_out, 5),
                           "open_ms": self._utc(min(getattr(d, "time_msc", 0) or 0 for d in ins)),
                           "close_ms": self._utc(getattr(last, "time_msc", 0))})
         state_reason = {getattr(m, "ORDER_STATE_EXPIRED", 6): "expired",

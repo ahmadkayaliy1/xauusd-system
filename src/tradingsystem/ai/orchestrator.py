@@ -194,10 +194,14 @@ class Orchestrator:
                 "equity_source": "configured account size"}
 
     def payload(self, pair: str, as_of: int, account: dict | None = None) -> dict:
-        """The snapshot the model receives for ``pair`` at ``as_of`` (account block + recent decisions)."""
+        """The snapshot the model receives for ``pair`` at ``as_of`` (account block + recent decisions; a live desk's
+        trade journal, D-055)."""
+        desk = self.s.pairs[pair].desk
+        extra = {"journal": self.store.journal(pair, as_of)} if desk is not None and desk.mode == "live" \
+            and desk.journal else {}
         return self.builder.build(pair, as_of, account=account or self.default_account(),
                                   history=self.store.recent(pair), memory=self.store.memory(pair),
-                                  performance=self.store.performance(pair))
+                                  performance=self.store.performance(pair), **extra)
 
     def horizon_ms(self, pair: str | None) -> int:
         """Latest allowed ``valid_until`` after the cycle time: 4 decision bars."""
@@ -864,7 +868,7 @@ class Orchestrator:
                           tn=None) -> DecisionRecord:
         tn = tn if tn is not None else tunables_of(self, pair)
         compact = {k: payload[k] for k in ("meta", "account", "market", "capabilities", "levels", "confluence", "history",
-                                           "memory", "performance") if k in payload}
+                                           "memory", "performance", "journal") if k in payload}
         pr = self._render("coordinator", self._system_vars(pair, account, tn),
                     self._user_vars(pair, as_of, reason, _dump(compact), account=payload.get("account") or account,
                                     tn=tn, assessments=json.dumps(assessments)))

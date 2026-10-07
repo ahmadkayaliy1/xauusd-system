@@ -118,7 +118,7 @@ def paper_outcome_detail(legs: list[dict]) -> dict:
         out.append({"leg": lg.get("id"), "tp_index": lg.get("tp_index"), "filled": lg.get("fill_price") is not None,
                     "reason": lg.get("close_reason") or lg.get("status"), "order_type": lg.get("order_type"),
                     "order_price": lg.get("order_price"), "fill_price": lg.get("fill_price"),
-                    "open_ms": lg.get("fill_ms"), "close_ms": lg.get("close_ms")})
+                    "close_price": lg.get("close_price"), "open_ms": lg.get("fill_ms"), "close_ms": lg.get("close_ms")})
     opens = [x["open_ms"] for x in out if x["filled"] and x["open_ms"] is not None]
     closes = [x["close_ms"] for x in out if x["close_ms"] is not None]
     return {"venue": "paper", "commission": 0.0, "swap": 0.0, "fee": 0.0, "open_ms": min(opens) if opens else None,

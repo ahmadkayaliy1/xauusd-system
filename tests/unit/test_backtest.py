@@ -306,3 +306,18 @@ def test_a_run_may_use_another_desk_management_policy(tmp_path):
     assert s.pairs["XAUUSD"].desk.management == "model" and s.pairs["XAUUSD"].desk.brief == "desks/xau_live_b"
     rc = RunConfig(start_ms=START, end_ms=START + 3_600_000, desk_management="be_2r")
     assert run_settings(three, tmp_path / "run2", rc).pairs["XAUUSD"].desk.management == "be_2r"
+
+
+def test_a_run_may_set_other_desk_settings_and_a_bad_one_is_refused(tmp_path):
+    # D-055: --desk-set sl_moves=profit_only journal=true (validated like the config file)
+    three = Path(__file__).resolve().parents[1] / "fixtures" / "config_three_pairs.yaml"
+    rc = RunConfig(start_ms=START, end_ms=START + 3_600_000, brief="desks/xau_live_e",
+                   desk={"sl_moves": "profit_only", "journal": True})
+    d = run_settings(three, tmp_path / "run", rc).pairs["XAUUSD"].desk
+    assert (d.sl_moves, d.journal, d.brief) == ("profit_only", True, "desks/xau_live_e")
+    with pytest.raises(ValueError):
+        run_settings(three, tmp_path / "run2", RunConfig(start_ms=START, end_ms=START + 3_600_000,
+                                                         desk={"sl_moves": "looser"}))
+    with pytest.raises(ValueError):
+        run_settings(three, tmp_path / "run3", RunConfig(start_ms=START, end_ms=START + 3_600_000,
+                                                         desk={"no_such_key": 1}))

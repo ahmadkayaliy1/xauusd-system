@@ -176,6 +176,20 @@ class RiskManagement(_M):
     sl_basis: Text(300, 5) = Field(description="Why the SL sits there (ATR / structure)")
 
 
+class TradeReview(_M):
+    """D-055: the model's own review of a trade of this pair that closed (``journal.trades``): why it ended so, the
+    lesson, and whether the idea lives on - kept in the journal for the rest of the day."""
+    decision: str = Field(pattern=r"^[0-9a-f]{8,32}$", description="The `decision` id of the closed trade in `journal`")
+    cause: Literal["entry", "stop_placement", "stop_moved", "against_structure", "news", "market_noise", "none"] = \
+        Field(description="What decided the result: the entry (timing / location), where the stop was placed, a stop "
+                          "moved too early, a trade against the structure, a release, ordinary noise, or none (it "
+                          "worked)")
+    lesson: Text(240, 3)
+    idea_alive: bool = Field(description="True when the trade's reason still holds (the original structural stop "
+                                         "not broken, the 1h structure intact)")
+    re_entry: Text(240) = Field("", description="When the idea is alive: the level and the condition to re-enter")
+
+
 class Recommendation(_M):
     contract_version: Literal["1.0"] = CONTRACT_VERSION
     pair: str = Field(min_length=3, max_length=20)
@@ -201,6 +215,8 @@ class Recommendation(_M):
     position_actions: Annotated[list[PositionAction], _trim(4)] = Field(
         default_factory=list, max_length=4,
         description="Actions on live positions / pending orders of this pair (allowed with NO_TRADE)")
+    trade_review: TradeReview | None = Field(
+        None, description="Your review of a trade in `journal` that closed since your last review of it")
 
     @model_validator(mode="before")
     @classmethod

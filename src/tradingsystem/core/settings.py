@@ -266,6 +266,13 @@ class DeskCfg(_Model):
     # model's stop / target changes; "be_2r" = a fixed bracket - the stop and the target stay as placed, the system moves
     # the stop to breakeven once the move reaches 2 R; the model may still close the trade or cancel an order (P12.7).
     management: Literal["model", "be_2r"] = "model"
+    # D-055 (owner, 2026-10-07), live: which stop moves are allowed. "tighter" = any tighter stop; "profit_only" = a
+    # stop moves only to the fill (breakeven) or into profit, never from a loss to a smaller loss - the model's
+    # modify_sl and the trailing rules (the breakeven rule's level is on the profit side already).
+    sl_moves: Literal["tighter", "profit_only"] = "tighter"
+    # D-055, live: the payload carries the desk's trade journal (`journal`: today's trades, every stop change and why,
+    # the price after each close, the model's own `trade_review` and lessons) - continuity from trade to trade
+    journal: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> "DeskCfg":
