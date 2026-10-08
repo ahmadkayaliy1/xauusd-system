@@ -655,6 +655,8 @@ class Orchestrator:
         rec = self._stamp(self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash), tn)
         rec.trigger_strength, setup = (trigger or (None, None, False))[:2]
         if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
+            await self._vote(rec, pair, prov, pr, images)
+        if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
             await self._escalate(rec, pair, payload, reason, as_of, account, uv, images, setup=setup, tn=tn)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
             return rec
@@ -678,6 +680,40 @@ class Orchestrator:
         else:
             _withhold(rec, "risk review failed")         # a trade that could not be reviewed is not released
         return rec
+
+    async def _vote(self, rec: DecisionRecord, pair: str, prov: LLMProvider, pr, images: list[ImageInput]) -> None:
+        """``desk.entry_votes`` (self-consistency): the same prompt, payload and charts go to the same model
+        ``entry_votes - 1`` more times, at once; the new trade stands only when a majority of all the answers names
+        its side (an unanswered or invalid sample counts against). The first answer's levels, management and
+        position_actions are kept; a trade without its majority becomes a valid NO_TRADE whose notes say so (the
+        model reads them next cycle) and whose position_actions stand. The extra wall time is added to the record's
+        latency (the backtest's clock moves by it)."""
+        desk = self.s.pairs[pair].desk
+        n = desk.entry_votes if desk is not None and desk.mode == "live" else 1
+        if n <= 1:
+            return
+        first = rec.recommendation
+        side = first["decision"]
+        t0 = time.monotonic()
+        gens = await asyncio.gather(*(self._gen(prov, Recommendation, pr.system, pr.user, "vote", pair, images=images,
+                                                role="vote") for _ in range(n - 1)))
+        rec.latency_ms = int(rec.latency_ms or 0) + int((time.monotonic() - t0) * 1000)
+        sides = [side] + [g.value.decision.value if g.ok and g.value is not None else "none" for g in gens]
+        for g in gens:
+            rec.cost_usd += g.cost_usd
+            rec.input_tokens = int(rec.input_tokens or 0) + sum(a.input_tokens or 0 for a in g.attempts)
+            rec.output_tokens = int(rec.output_tokens or 0) + sum(a.output_tokens or 0 for a in g.attempts)
+            rec.sub_outputs.append({"role": "vote", "label": pair, "provider": prov.name, "model": prov.model,
+                                    "prompt_hash": pr.prompt_hash, "ok": g.ok,
+                                    "output": json.loads(g.value.model_dump_json()) if g.ok and g.value else None,
+                                    "errors": g.errors, "cost_usd": g.cost_usd})
+        agree = sides.count(side)
+        tally = f"vote {agree}/{n} {side} ({', '.join(sides)})"
+        if agree * 2 > n:
+            rec.errors.append(f"{tally}: placed")
+            return
+        rec.recommendation, rec.rr_computed = _as_no_trade(first, f"{tally}: no majority for the trade"), None
+        rec.errors.append(f"{tally}: no majority - the trade is not placed; its position_actions stand")
 
     def escalation_due(self, rec: DecisionRecord, pair: str, setup: str | None = None) -> str | None:
         """Why a strong trade idea goes to the stronger model first (None = no escalation). ``setup``: the setup

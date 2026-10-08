@@ -273,6 +273,11 @@ class DeskCfg(_Model):
     # D-055, live: the payload carries the desk's trade journal (`journal`: today's trades, every stop change and why,
     # the price after each close, the model's own `trade_review` and lessons) - continuity from trade to trade
     journal: bool = False
+    # live: a new trade is asked this many times in all (the same model, prompt, payload and charts - independent
+    # answers, the extra ones at once) and placed only when a majority names the same side (self-consistency, Wang et
+    # al. 2022: a verbalized confidence is poorly calibrated, the agreement of samples is a better one); the first
+    # answer's levels are kept, an unanswered sample counts against; 1 = off
+    entry_votes: int = Field(1, ge=1, le=5)
 
     @model_validator(mode="after")
     def _check(self) -> "DeskCfg":
