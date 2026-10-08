@@ -49,6 +49,18 @@ SCREEN_SETTLE_MS = 6_000             # the engine screens this long after a 5-mi
 # "more than 2 in the run" rule restarted whole runs over three scattered 180-s timeouts)
 MAX_ERROR_CYCLES = 8
 FAILED_IN_A_ROW = 3
+ONLINE_HOST = ("api.anthropic.com", 443)     # after a failed call the run waits until this answers (an outage)
+ONLINE_POLL_S = 30
+
+
+def online(timeout_s: float = 5.0) -> bool:
+    """The provider's host accepts a TCP connection (DNS and the route work)."""
+    import socket
+    try:
+        with socket.create_connection(ONLINE_HOST, timeout=timeout_s):
+            return True
+    except OSError:
+        return False
 AI_ERRORS = "ai errors"                 # stopped_by of a run whose calls kept failing (the queue runs it again)
 SUSPEND_S = 60                       # a wall/monotonic gap larger than this = the computer slept during the run
 DUE_KEY = "bt:due:"                  # engine_kv: when a run's answer reached its executor (replay uses it exactly)
@@ -174,6 +186,7 @@ class Backtest:
         self._news_at = 0
         self._clk0 = sample_clock()          # tick (with sleep) - awake (without): grows only while the computer sleeps
         self.suspended_s = 0.0
+        self.offline_s = 0.0                 # real seconds the run waited for the internet (clock held)
 
     # ------------------------------------------------------------------ setup
     def prepare(self) -> dict:
@@ -258,6 +271,8 @@ class Backtest:
                     break
                 if self.eng is not None:
                     await self._engine_tick()
+                    if self._failed_in_a_row():     # the last call failed: an outage pauses the run, never ends it
+                        await self._wait_online()
                     total, in_a_row = self._error_cycles(), self._failed_in_a_row()
                     if total > MAX_ERROR_CYCLES or in_a_row >= FAILED_IN_A_ROW:   # the network / the provider is down
                         self.stopped_by = AI_ERRORS
@@ -272,7 +287,8 @@ class Backtest:
         errors = self._error_cycles()
         interrupted = bool(self.suspended_s) or errors > MAX_ERROR_CYCLES or self.stopped_by == AI_ERRORS
         return {"calls": self.calls, "stopped_by": self.stopped_by, "end": iso(self.clock), "real_s": round(self.real_s),
-                "suspended_s": round(self.suspended_s), "error_cycles": errors, "interrupted": interrupted}
+                "suspended_s": round(self.suspended_s), "offline_s": round(self.offline_s), "error_cycles": errors,
+                "interrupted": interrupted}
 
     def _error_cycles(self) -> int:
         """Cycles that ended without an answer (a failed or cut-off call) - a run with any is not a clean sample."""
@@ -285,6 +301,18 @@ class Backtest:
                 con.close()
         except sqlite3.Error:
             return 0
+
+    async def _wait_online(self) -> None:
+        """No internet (the provider's host does not answer): the run waits in real time with its clock held, so an
+        outage costs a missed call, not the run (2026-10-08: two runs at 17:00 of their day were thrown away)."""
+        if online():
+            return
+        t0 = time.time()
+        log.warning("no internet (%s:%d) - the run waits, its clock held at %s", *ONLINE_HOST, iso(self.clock))
+        while not online():
+            await asyncio.sleep(ONLINE_POLL_S)
+        self.offline_s += time.time() - t0
+        log.warning("internet back after %.0f s - the run goes on", time.time() - t0)
 
     def _failed_in_a_row(self) -> int:
         """How many of the latest cycles (skipped ones aside) ended without an answer, one after the other."""
