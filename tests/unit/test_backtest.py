@@ -344,3 +344,25 @@ def test_a_run_stops_on_an_outage_not_on_scattered_timeouts(tmp_path):
     assert rmod.Backtest._failed_in_a_row(me) == 3 >= rmod.FAILED_IN_A_ROW
     add("valid")
     assert rmod.Backtest._failed_in_a_row(me) == 0
+
+
+def test_an_outage_pauses_the_run_with_its_clock_held(monkeypatch):
+    # 2026-10-08: two runs at 17:00 of their day were thrown away over a three-minute DNS outage
+    import asyncio
+    from types import SimpleNamespace as NS
+
+    from tradingsystem.backtest import runner as rmod
+    answers = iter([False, False, True])
+    monkeypatch.setattr(rmod, "online", lambda timeout_s=5.0: next(answers))
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+    monkeypatch.setattr(rmod.asyncio, "sleep", fake_sleep)
+    me = NS(clock=START, offline_s=0.0)
+    asyncio.run(rmod.Backtest._wait_online(me))
+    assert slept == [rmod.ONLINE_POLL_S] and me.clock == START and me.offline_s >= 0.0
+    monkeypatch.setattr(rmod, "online", lambda timeout_s=5.0: True)
+    slept.clear()
+    asyncio.run(rmod.Backtest._wait_online(me))                # online: no wait at all
+    assert slept == []
