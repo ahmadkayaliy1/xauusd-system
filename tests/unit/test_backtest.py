@@ -321,3 +321,26 @@ def test_a_run_may_set_other_desk_settings_and_a_bad_one_is_refused(tmp_path):
     with pytest.raises(ValueError):
         run_settings(three, tmp_path / "run3", RunConfig(start_ms=START, end_ms=START + 3_600_000,
                                                          desk={"no_such_key": 1}))
+
+
+def test_a_run_stops_on_an_outage_not_on_scattered_timeouts(tmp_path):
+    # 2026-10-08: three 180-s timeouts spread over a day restarted whole runs; only an outage stops one now
+    import sqlite3
+    from types import SimpleNamespace as NS
+
+    from tradingsystem.backtest import runner as rmod
+    con = sqlite3.connect(tmp_path / "app.db")
+    con.execute("CREATE TABLE ai_decisions (id TEXT, ts INTEGER, status TEXT)")
+    me = NS(s=NS(paths=NS(state=lambda: tmp_path)))
+
+    def add(*sts):
+        n = con.execute("SELECT count(*) FROM ai_decisions").fetchone()[0]
+        con.executemany("INSERT INTO ai_decisions VALUES (?,?,?)", [(f"d{n + i}", n + i, s) for i, s in enumerate(sts)])
+        con.commit()
+
+    add("valid", "error", "valid", "error", "skipped", "valid", "error")
+    assert rmod.Backtest._failed_in_a_row(me) == 1 and rmod.Backtest._error_cycles(me) == 3
+    add("skipped", "error", "interrupted")                    # a skipped screen does not break the streak
+    assert rmod.Backtest._failed_in_a_row(me) == 3 >= rmod.FAILED_IN_A_ROW
+    add("valid")
+    assert rmod.Backtest._failed_in_a_row(me) == 0

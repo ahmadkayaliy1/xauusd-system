@@ -44,7 +44,11 @@ log = logging.getLogger("backtest")
 STEP_MS = 5_000                      # clock step while a position / order is live
 HOUSEKEEPING_MS = 60_000             # virtual outcomes + metrics, as the live executor (every minute)
 SCREEN_SETTLE_MS = 6_000             # the engine screens this long after a 5-minute close (its SETTLE_MS is 5 s)
-MAX_ERROR_CYCLES = 2                 # a slow / failed call happens live too; more than this = not a clean run
+# a slow / failed call happens live too (a missed screen, counted in the report); an outage is FAILED_IN_A_ROW failed
+# cycles one after the other, or more than MAX_ERROR_CYCLES in the run: then it is not a sample (2026-10-08: the old
+# "more than 2 in the run" rule restarted whole runs over three scattered 180-s timeouts)
+MAX_ERROR_CYCLES = 8
+FAILED_IN_A_ROW = 3
 AI_ERRORS = "ai errors"                 # stopped_by of a run whose calls kept failing (the queue runs it again)
 SUSPEND_S = 60                       # a wall/monotonic gap larger than this = the computer slept during the run
 DUE_KEY = "bt:due:"                  # engine_kv: when a run's answer reached its executor (replay uses it exactly)
@@ -254,9 +258,10 @@ class Backtest:
                     break
                 if self.eng is not None:
                     await self._engine_tick()
-                    if self._error_cycles() > MAX_ERROR_CYCLES:   # the network / the provider is down: not a sample
+                    total, in_a_row = self._error_cycles(), self._failed_in_a_row()
+                    if total > MAX_ERROR_CYCLES or in_a_row >= FAILED_IN_A_ROW:   # the network / the provider is down
                         self.stopped_by = AI_ERRORS
-                        log.warning("more than %d failed calls - the run stops (%s)", MAX_ERROR_CYCLES, iso(self.clock))
+                        log.warning("%d failed calls (%d in a row) - the run stops (%s)", total, in_a_row, iso(self.clock))
         finally:
             self.real_s = time.time() - t_real
             try:
@@ -265,7 +270,7 @@ class Backtest:
                 timeutil.set_sim_clock(None)
                 keep_awake(False)
         errors = self._error_cycles()
-        interrupted = bool(self.suspended_s) or errors > MAX_ERROR_CYCLES
+        interrupted = bool(self.suspended_s) or errors > MAX_ERROR_CYCLES or self.stopped_by == AI_ERRORS
         return {"calls": self.calls, "stopped_by": self.stopped_by, "end": iso(self.clock), "real_s": round(self.real_s),
                 "suspended_s": round(self.suspended_s), "error_cycles": errors, "interrupted": interrupted}
 
@@ -280,6 +285,24 @@ class Backtest:
                 con.close()
         except sqlite3.Error:
             return 0
+
+    def _failed_in_a_row(self) -> int:
+        """How many of the latest cycles (skipped ones aside) ended without an answer, one after the other."""
+        try:
+            con = sqlite3.connect(f"file:{(self.s.paths.state() / 'app.db').as_posix()}?mode=ro", uri=True)
+            try:
+                rows = con.execute("SELECT status FROM ai_decisions WHERE status != 'skipped' ORDER BY ts DESC, rowid "
+                                   "DESC LIMIT ?", (FAILED_IN_A_ROW,)).fetchall()
+            finally:
+                con.close()
+        except sqlite3.Error:
+            return 0
+        n = 0
+        for (st,) in rows:
+            if st not in ("error", "interrupted"):
+                break
+            n += 1
+        return n
 
     def _check_suspend(self) -> None:
         """A sleep / hibernate of the computer during the run (the supervisor's measure: time since boot with sleep -
