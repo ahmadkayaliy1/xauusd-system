@@ -189,7 +189,7 @@ ai:
   output_language: en
   min_minutes_between_calls: 15        # per pair
   max_idle_minutes: 120                # hybrid: at least one review per pair every 2 h while the market is open
-  max_parallel_calls: 2
+  max_parallel_calls: 3                # D-055 F: a flat cycle's three entry votes at once (one pair)
   review_floor_minutes: 5              # next_review price/candle triggers: once per decision, >= this after the last call
   max_backoff_minutes: 120             # spacing doubles after each failed cycle of a pair, up to this
   cycle_deadline_s: 600                # an AI cycle is cut off after this (unfinished pairs stored as 'error')
@@ -249,7 +249,7 @@ ai:
       effort: medium
       free_tier: true                  # flat subscription: no marginal USD cost per call
       structured_output: prompt        # schema in the prompt, one turn (--json-schema costs ~4-5x: D-035)
-      max_concurrency: 2               # two pairs analysed at once (set 1 on 4 GB machines)
+      max_concurrency: 3               # D-055 F: the three entry votes at once (~170 MB each; set 1 on 4 GB machines)
       rpm: 4
       rpd: 160                         # daily cap (D-053: XAUUSD 120 a day + reviews/events) - keeps room for your own use
       timeout_s: 180                  # serialized calls: keep a 3-pair batch within risk.max_recommendation_age_s

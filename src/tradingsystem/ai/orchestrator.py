@@ -651,11 +651,18 @@ class Orchestrator:
         uv = self._user_vars(pair, as_of, reason, _dump(payload), account=payload.get("account") or account,
                              tn=tn, charts_note=note)
         pr = self._render("agent_per_pair", self._system_vars(pair, account, tn), uv, appendix=self._brief(pair))
-        gen = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair, images=images)
+        n = self._votes(pair, payload)
+        if n > 1:                  # flat on a voting desk: every answer at once - the vote costs no extra wait
+            gen, voted = await self._parallel_vote(pair, prov, pr, images, n)
+        else:
+            gen, voted = await self._gen(prov, Recommendation, pr.system, pr.user, "agent_per_pair", pair,
+                                         images=images), None
         rec = self._stamp(self._record(pair, "agent_per_pair", reason, payload, gen, prov, pr.prompt_hash), tn)
         rec.trigger_strength, setup = (trigger or (None, None, False))[:2]
-        if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
-            await self._vote(rec, pair, prov, pr, images)
+        if voted is not None:
+            self._vote_outcome(rec, voted, prov, pr)
+        elif rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
+            await self._vote(rec, pair, prov, pr, images)      # a new trade next to a live one: asked again after
         if rec.status == "valid" and rec.recommendation["decision"] != Decision.NO_TRADE.value:
             await self._escalate(rec, pair, payload, reason, as_of, account, uv, images, setup=setup, tn=tn)
         if not review or rec.status != "valid" or rec.recommendation["decision"] == Decision.NO_TRADE.value:
@@ -680,6 +687,58 @@ class Orchestrator:
         else:
             _withhold(rec, "risk review failed")         # a trade that could not be reviewed is not released
         return rec
+
+    def _votes(self, pair: str, payload: dict) -> int:
+        """How many answers a FLAT cycle of ``pair`` asks for at once: ``desk.entry_votes`` on a live desk without an
+        open position of the pair (pending orders allowed - a replacement is voted too); 1 otherwise (a cycle with an
+        open trade is about managing it; unknown holdings count as not flat)."""
+        desk = self.s.pairs[pair].desk
+        if desk is None or desk.mode != "live" or desk.entry_votes <= 1:
+            return 1
+        acct = payload.get("account") or {}
+        if "open_positions" not in acct or acct.get("open_positions"):
+            return 1
+        return desk.entry_votes
+
+    async def _parallel_vote(self, pair: str, prov: LLMProvider, pr, images: list[ImageInput], n: int):
+        """Self-consistency at no extra wait: ``n`` answers to the same prompt, payload and charts at once. The lead
+        answer is the first one naming the side a majority names (BUY or SELL); without a trade majority it is the
+        first valid NO_TRADE answer, else the first answer (its trade is then not placed). → (lead, vote detail)."""
+        t0 = time.monotonic()
+        gens = await asyncio.gather(*(self._gen(prov, Recommendation, pr.system, pr.user,
+                                                "agent_per_pair" if i == 0 else "vote", pair, images=images,
+                                                role="decision" if i == 0 else "vote") for i in range(n)))
+        wall_ms = int((time.monotonic() - t0) * 1000)
+        sides = [g.value.decision.value if g.ok and g.value is not None else "none" for g in gens]
+        side = next((s for s in (Decision.BUY.value, Decision.SELL.value) if sides.count(s) * 2 > n), None)
+        if side is not None:
+            lead = sides.index(side)
+        else:
+            lead = next((i for i, s in enumerate(sides) if s == Decision.NO_TRADE.value), 0)
+        return gens[lead], {"gens": gens, "lead": lead, "sides": sides, "side": side, "n": n, "wall_ms": wall_ms}
+
+    def _vote_outcome(self, rec: DecisionRecord, v: dict, prov: LLMProvider, pr) -> None:
+        """The parallel vote on the record: every answer's tokens and cost, the other answers as ``vote`` sub-outputs,
+        the wall time as the latency, the tally in ``errors``; a lead trade without a majority becomes NO_TRADE."""
+        rec.latency_ms = v["wall_ms"]
+        for i, g in enumerate(v["gens"]):
+            if i == v["lead"]:
+                continue
+            rec.cost_usd += g.cost_usd
+            rec.input_tokens = int(rec.input_tokens or 0) + sum(a.input_tokens or 0 for a in g.attempts)
+            rec.output_tokens = int(rec.output_tokens or 0) + sum(a.output_tokens or 0 for a in g.attempts)
+            rec.sub_outputs.append({"role": "vote", "label": rec.pair, "provider": prov.name, "model": prov.model,
+                                    "prompt_hash": pr.prompt_hash, "ok": g.ok,
+                                    "output": json.loads(g.value.model_dump_json()) if g.ok and g.value else None,
+                                    "errors": g.errors, "cost_usd": g.cost_usd})
+        sides, n, side = v["sides"], v["n"], v["side"]
+        if side is not None:
+            rec.errors.append(f"vote {sides.count(side)}/{n} {side} ({', '.join(sides)}): placed")
+            return
+        tally = f"vote ({', '.join(sides)})"
+        if rec.status == "valid" and rec.recommendation and rec.recommendation["decision"] != Decision.NO_TRADE.value:
+            rec.recommendation, rec.rr_computed = _as_no_trade(rec.recommendation, f"{tally}: no majority"), None
+        rec.errors.append(f"{tally}: no majority for a trade - NO_TRADE")
 
     async def _vote(self, rec: DecisionRecord, pair: str, prov: LLMProvider, pr, images: list[ImageInput]) -> None:
         """``desk.entry_votes`` (self-consistency): the same prompt, payload and charts go to the same model

@@ -25,7 +25,7 @@ FAIL = RuntimeError("no answer within 180s")
 def desk(tmp_path, monkeypatch):
     made = []
 
-    def _make(answers, votes=3, mode="live"):
+    def _make(answers, votes=3, mode="live", flat=None):
         s = load_settings(env_path=Path("nope.env"), extra_env={"AGENT_MODE": "agent_per_pair"})
         pc = s.pairs["XAUUSD"]
         d = (pc.desk or DeskCfg()).model_copy(update={"mode": mode, "entry_votes": votes})
@@ -42,7 +42,11 @@ def desk(tmp_path, monkeypatch):
         usage = UsageStore(tmp_path / "app.db")
         store = DecisionStore(tmp_path / "app.db", "cfg")
         made.append((usage, store))
-        o = Orchestrator(s, InstrumentRegistry.from_settings(s), FakeBuilder(), store, usage,
+        builder = FakeBuilder()
+        if flat is not None:                  # the account block of a flat (or holding) desk
+            builder.payload["account"] = {**builder.payload["account"],
+                                          "open_positions": [] if flat else [{"decision": "aaaaaaaa", "side": "SELL"}]}
+        o = Orchestrator(s, InstrumentRegistry.from_settings(s), builder, store, usage,
                          CostGovernor(AIBudgetCfg(), usage))
         [r] = asyncio.run(o.run_cycle([CycleRequest("XAUUSD", "test")], as_of=AS_OF))
         return r, prov
@@ -81,3 +85,29 @@ def test_no_trade_is_never_re_asked_and_one_vote_is_off(desk):
     assert len(prov.calls) == 1 and r.recommendation["decision"] == "BUY"
     r, prov = desk([BUY], mode="shadow")                              # a shadow desk is never voted
     assert len(prov.calls) == 1
+
+
+# ------------------------------------------------------------------ flat: every answer at once (no extra wait)
+def test_flat_cycles_ask_every_answer_at_once_and_a_majority_trades(desk):
+    r, prov = desk([NO, BUY, BUY], flat=True)                          # the first said no, the majority BUY
+    assert len(prov.calls) == 3 and r.status == "valid" and r.recommendation["decision"] == "BUY"
+    assert any(e.startswith("vote 2/3 BUY") for e in r.errors)
+    assert [s["role"] for s in r.sub_outputs].count("vote") == 2
+
+
+def test_flat_cycles_without_a_trade_majority_are_no_trade(desk):
+    r, prov = desk([BUY, NO, NO], flat=True)
+    assert len(prov.calls) == 3 and r.status == "valid" and r.recommendation["decision"] == "NO_TRADE"
+    assert any("no majority" in e for e in r.errors)
+    r, _ = desk([BUY, FAIL, FAIL], flat=True)                           # the lone trade answer is not placed
+    assert r.status == "valid" and r.recommendation["decision"] == "NO_TRADE"
+    assert "NOT placed" in r.recommendation["operator_notes"]
+    r, _ = desk([NO, NO, NO], flat=True)                               # all three asked even when nothing trades
+    assert r.recommendation["decision"] == "NO_TRADE"
+
+
+def test_a_holding_desk_asks_once_and_votes_only_a_new_trade(desk):
+    r, prov = desk([NO], flat=False)
+    assert len(prov.calls) == 1
+    r, prov = desk([BUY, BUY, NO], flat=False)                         # a new trade next to a live one: asked after
+    assert len(prov.calls) == 3 and r.recommendation["decision"] == "BUY"
