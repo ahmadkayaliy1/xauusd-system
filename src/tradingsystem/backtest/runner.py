@@ -267,12 +267,16 @@ class Backtest:
                     last_hk = self._ex_step(last_hk)
                     if self.eng is not None and self._busy():
                         await self._engine_tick()
+                        last_hk = self._ex_step(last_hk)   # the answer reaches the executor when it arrives
                 if self.clock >= self.rc.end_ms:
                     break
                 if self.eng is not None:
                     await self._engine_tick()
                     if self._failed_in_a_row():     # the last call failed: an outage pauses the run, never ends it
                         await self._wait_online()
+                    # as live: the executor sees the answer the moment it arrives (screen + latency), not at the next
+                    # screen - before 2026-10-08 every new order of a claude run was placed at screen + 5 min
+                    last_hk = self._ex_step(last_hk)
                     total, in_a_row = self._error_cycles(), self._failed_in_a_row()
                     if total > MAX_ERROR_CYCLES or in_a_row >= FAILED_IN_A_ROW:   # the network / the provider is down
                         self.stopped_by = AI_ERRORS
