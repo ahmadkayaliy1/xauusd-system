@@ -13,7 +13,8 @@
     and src), reads the market of C:\TradingSystems\XAUUSD\data (read only) and writes only under data\backtests.
 #>
 $ErrorActionPreference = 'Continue'
-$MaxWorkers = 2
+$MaxWorkers = 2                                   # BT_MAX_WORKERS raises it (e.g. 4 while the live system is stopped)
+if ($env:BT_MAX_WORKERS -match '^[1-6]$') { $MaxWorkers = [int]$env:BT_MAX_WORKERS }
 $root = Split-Path -Parent $PSScriptRoot
 $data = 'C:\TradingSystems\XAUUSD\data'
 $bt = Join-Path $data 'backtests'
