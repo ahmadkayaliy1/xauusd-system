@@ -23,6 +23,9 @@ $others = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" | Wher
     $_.ProcessId -ne $PID -and $_.CommandLine -match 'backtest_queue\.ps1' })
 if ($others.Count -ge $MaxWorkers) { Write-Host "already $($others.Count) queue workers - nothing done"; exit 1 }
 $env:PYTHONPATH = Join-Path $root 'src'
+# the live system comes first: this worker and the runs it starts (they inherit it) take spare CPU only
+# (2026-10-08: the live executor's heartbeat stalled three times under two runs + the unit suite)
+try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
 Set-Location $root
 
 function Online {
