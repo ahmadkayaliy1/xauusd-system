@@ -459,6 +459,19 @@ class Executor:
         else:
             self.store.set_execution_state(did, state, detail)
 
+    def _cancels_first(self, cand: dict) -> None:
+        """F (owner, 2026-10-08): an answer that replaces an unfilled pending order - a new BUY/SELL plus
+        ``cancel_order`` in its ``position_actions`` - has those actions carried out (through the action gate, as
+        always) BEFORE the new order is gated, so the old order is gone when ``no_same_direction`` looks. A refused or
+        failed cancel leaves the old order live and the new one is then refused as before: never two orders on one
+        side. Other answers keep the usual order (the new trade first, the actions in the same loop)."""
+        acts = cand["rec"].get("position_actions") or []
+        if not self.s.execution.position_actions.enabled or not any(a.get("action") == "cancel_order" for a in acts):
+            return
+        d = {"id": cand["id"], "ts": cand["ts"], "rec": cand["rec"]}
+        if self._actions_of(d, cand["pair"], now_ms()):
+            self.store.set_actions_state(cand["id"], "done")
+
     def _handle(self, cand: dict) -> bool:
         """True when an order reached the backend (placed or partly placed)."""
         pair, rec, did = cand["pair"], cand["rec"], cand["id"]
@@ -487,6 +500,8 @@ class Executor:
                              self.s.execution.max_basis_deviation_pct)
             basis_ok, basis_reason = bc.ok, bc.reason
             rec_x = translate(rec, bc.basis, exe.contract["tick_size"] if exe.contract else 0.01)
+        if not shadow:
+            self._cancels_first(cand)            # a replacement: its own cancels go before the same-side check
         acct = self.paper.account({**self.marks(), exe.key: eq}) if self.paper else self.mt5.account()
         dd = self.update_peak(acct, force=True)
         spec = exe.contract or {"contract_size": 1, "volume_min": 0.01, "volume_step": 0.01, "tick_size": 0.01}

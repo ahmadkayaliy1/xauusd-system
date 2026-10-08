@@ -532,7 +532,7 @@ def test_used_today_counts_every_ledger_row_of_the_pair(usage):
 
 # ------------------------------------------------------------------ (6) the next_review prompt line
 def test_core_rules_v7_bound_next_review_on_a_flat_no_trade(orch):  # noqa: F811
-    assert versions()["shared/core_rules"] == 7
+    assert versions()["shared/core_rules"] == 8
     o, _, _ = orch(lambda schema, user: rec_for())
     system = render("agent_per_pair", o._system_vars("XAUUSD", {}),
                     o._user_vars("XAUUSD", AS_OF, "t", "{}")).system            # no new $placeholder: renders
