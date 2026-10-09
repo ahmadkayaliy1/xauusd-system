@@ -1086,3 +1086,18 @@ def test_a_profit_only_desk_trails_only_once_the_stop_reaches_breakeven():
     assert (p.status, p.value) == ("apply", 99.5)
     [p] = plans(r, legs, v, dataclasses.replace(ctx(atr=2.5, sl0=95.0), profit_only=True))   # 104 - 3.75 = 100.25
     assert (p.status, p.value) == ("apply", 100.25)
+
+
+def test_a_breakeven_and_a_trail_wait_for_the_stop_move_floor():
+    # D-055 desk.sl_move_min_r 1.5: a breakeven due at 0.3 R waits (noop, asked again) until the best move >= 1.5 R
+    import dataclasses
+    r = [rule("move_sl_to_breakeven", "r_multiple", 0.3)]
+    legs = [pos(fill=100.0, sl=95.0)]
+    v = venue(104.0, 104.2)
+    [p] = plans(r, legs, v, dataclasses.replace(ctx(sl0=95.0), min_r=1.5, excursion_r=lambda lg: 0.8))
+    assert p.status == "noop" and "waits" in p.reason
+    [p] = plans(r, legs, v, dataclasses.replace(ctx(sl0=95.0), min_r=1.5, excursion_r=lambda lg: 1.6))
+    assert p.status == "apply"
+    t = [rule("trail_atr", "r_multiple", 0.5, atr_mult=1.0)]
+    [p] = plans(t, legs, v, dataclasses.replace(ctx(atr=2.0, sl0=95.0), min_r=1.5, excursion_r=lambda lg: 0.8))
+    assert p.status == "bar_done" and "waits" in p.reason

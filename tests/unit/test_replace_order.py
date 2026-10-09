@@ -62,3 +62,12 @@ def test_without_the_cancel_the_same_side_order_is_still_refused(armed):  # noqa
     state, detail = _decision(ex, NEW)
     assert state == "rejected" and "no_same_direction" in detail.get("reason", "")
     assert _live_kinds(ex, OLD) == ["order"]
+
+
+def test_the_executor_measures_the_best_move_in_r_of_the_original_stop(armed):  # noqa: F811
+    # a SELL filled 5.00 above the ask with its stop 15.00 above the fill: 5 / 15 R so far (no candles: the quote)
+    from .test_phase5_exec import _open_sell_in_profit
+    ex, ticks = armed
+    did, sl0, fill = _open_sell_in_profit(ex, ticks[-1])
+    [lg] = ex.model_legs.legs_of(did)
+    assert abs(ex.excursion_r(lg) - 5.0 / 15.0) < 0.02

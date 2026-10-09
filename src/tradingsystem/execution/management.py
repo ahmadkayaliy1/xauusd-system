@@ -137,6 +137,8 @@ class RuleContext:
     decision_bar_close: float | None = None          # close of that bar (candle_close triggers)
     decision_tf_ms: int | None = None                # its length (a close counts only after the fill)
     profit_only: bool = False                        # D-055: a trailing stop moves only to the fill or beyond it
+    min_r: float = 0.0                               # D-055: no stop move before the trade's best move reached this R
+    excursion_r: Callable[[Leg], float | None] | None = None   # the leg's best favourable move since its fill, in R
 
 
 @dataclass
@@ -181,6 +183,26 @@ def profit_only_stops(s: Settings, pair: str) -> bool:
     """D-055: the pair's desk moves a stop only to the fill (breakeven) or into profit (``desk.sl_moves``)."""
     pcfg = s.pairs.get(pair)
     return pcfg is not None and pcfg.desk is not None and pcfg.desk.sl_moves == "profit_only"
+
+
+def sl_move_min_r(s: Settings, pair: str) -> float:
+    """D-055: the R the trade's best favourable move must reach before any stop of it moves (``desk.sl_move_min_r``;
+    0 = no floor)."""
+    pcfg = s.pairs.get(pair)
+    return float(pcfg.desk.sl_move_min_r) if pcfg is not None and pcfg.desk is not None else 0.0
+
+
+def below_min_r(leg: Leg, min_r: float, excursion_r: Callable[[Leg], float | None] | None) -> str | None:
+    """Why a stop move of ``leg`` must wait for the floor (None = it may move): the best favourable move since the
+    fill is under ``min_r`` R, or it cannot be measured yet (no fill, no original stop, no prices) - then it waits."""
+    if min_r <= 0:
+        return None
+    r = excursion_r(leg) if excursion_r is not None else None
+    if r is None:
+        return f"the trade's move since the fill is not known yet (stops move from {min_r:g} R)"
+    if r < min_r - 1e-9:
+        return f"the trade's best move is {r:.2f} R (< {min_r:g} R): no stop moves before {min_r:g} R"
+    return None
 
 
 def loss_side(side: str, stop: float, fill: float | None) -> bool:
@@ -334,6 +356,10 @@ def _stop_plan(base: dict, leg: Leg, v: Venue, target: float, label: str, runnin
         return PlannedAction(**base, action="set_sl", value=target, status="bar_done",
                              reason=f"{why} → {label} is still on the losing side of the fill {leg.fill}: "
                                     f"the stop moves only to breakeven or into profit (D-055)")
+    wait = below_min_r(leg, ctx.min_r, ctx.excursion_r)
+    if wait is not None:                             # D-055: a breakeven waits (noop), a trail waits for the next bar
+        return PlannedAction(**base, action="set_sl", value=target, status="bar_done" if trailing else "noop",
+                             reason=f"{why} → {label} waits: {wait}")
     if trailing and cur is not None and abs(target - cur) < ctx.cfg.min_sl_change_ticks * v.tick_size - EPS:
         return PlannedAction(**base, action="set_sl", value=target, status="bar_done",
                              reason=f"{why} → {label}: move {abs(target - cur):.5g} < "
@@ -934,7 +960,8 @@ class PositionManager:
                            atr=atr, swing_low=lo, swing_high=hi, original_sl=float(sl0) if sl0 is not None else None,
                            cfg=self.cfg, rule_state=state, decision_bar_close=close,
                            decision_tf_ms=pcfg.decision_timeframe.ms if pcfg else None,
-                           profit_only=profit_only_stops(self.s, pair))
+                           profit_only=profit_only_stops(self.s, pair), min_r=sl_move_min_r(self.s, pair),
+                           excursion_r=getattr(m, "excursion_r", None))
 
     def _announce(self, ev: str, lg: Leg) -> None:
         base = {"pair": lg.pair, "decision": lg.decision_id, "leg": lg.key, "tp_index": lg.tp_index, "side": lg.side,

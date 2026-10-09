@@ -542,3 +542,15 @@ def test_a_profit_only_desk_moves_a_stop_only_to_breakeven_or_into_profit():
     p = evaluate(act("modify_sl", value=102.0), [sell], sv, ctx(profit_only=True))[0]
     assert p.status == "rejected" and "profit_only" in p.reason
     assert status(evaluate(act("modify_sl", value=99.5), [sell], sv, ctx(profit_only=True))) == [("set_sl", "apply")]
+
+
+def test_no_stop_move_before_the_trade_ran_the_floor_in_r():
+    # D-055 desk.sl_move_min_r: the BUY filled at 100.0 (stop 95.0); a tighter stop waits until the best move >= 1.5 R
+    v = lambda lg: venue()                                    # noqa: E731
+    p = evaluate(act("modify_sl", value=100.5), [leg()], v, ctx(min_r=1.5, excursion_r=lambda lg: 1.0))[0]
+    assert p.status == "rejected" and "sl_move_min_r" in p.reason and "1.00 R" in p.reason
+    assert status(evaluate(act("modify_sl", value=100.5), [leg()], v,
+                           ctx(min_r=1.5, excursion_r=lambda lg: 1.6))) == [("set_sl", "apply")]
+    p = evaluate(act("modify_sl", value=100.5), [leg()], v, ctx(min_r=1.5, excursion_r=lambda lg: None))[0]
+    assert p.status == "rejected" and "not known yet" in p.reason                  # unknown: it waits
+    assert status(evaluate(act("modify_sl", value=100.5), [leg()], v, ctx())) == [("set_sl", "apply")]   # floor off

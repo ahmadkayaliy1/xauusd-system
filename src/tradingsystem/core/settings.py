@@ -278,6 +278,11 @@ class DeskCfg(_Model):
     # al. 2022: a verbalized confidence is poorly calibrated, the agreement of samples is a better one); the first
     # answer's levels are kept, an unanswered sample counts against; 1 = off
     entry_votes: int = Field(1, ge=1, le=5)
+    # D-055, live: no stop moves (the model's modify_sl, the breakeven and trailing rules) until the trade's best
+    # favourable move since its fill reached this many R of its original stop; 0 = off. The model's own reviews named
+    # "breakeven too early" six times in a day; the tick replay of every B / G trade (Aug, Sept, Oct) at 1.5 R:
+    # August +13.00 → +17.72, Sept-Oct +117.82 → +197.61, G +125.74 → +211.46
+    sl_move_min_r: float = Field(0.0, ge=0.0, le=5.0)
 
     @model_validator(mode="after")
     def _check(self) -> "DeskCfg":

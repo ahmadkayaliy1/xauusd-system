@@ -50,7 +50,7 @@ from .desk import (RESUME_REVIEW_MS, REVIEW_EVENT, SHADOW_KEY, ShadowGuard, Shad
 from .drawdown import AccountPeak
 from .exposure import live_sides
 from ..analysis.desk_windows import desk_window_state, weekend_flat_ms
-from .management import ActionLog, MT5Legs, PaperLegs, PositionManager, profit_only_stops
+from .management import ActionLog, MT5Legs, PaperLegs, PositionManager, profit_only_stops, sl_move_min_r
 from .metrics import VIRTUAL_HORIZON_MS, MetricsJob, mt5_outcome_detail, paper_outcome_detail, virtual_valid_until
 from ..core.tunables import Tunables
 from .price_mapping import check_basis, translate
@@ -191,6 +191,8 @@ class Executor:
         self.metrics = MetricsJob(s, self.store, self.reg, self.reader, actions=self.actions,
                                   paper_legs=self.paper.decision_legs if self.paper else None)
         self._mkt: dict[tuple, object] = {}
+        self._exc: dict[tuple, tuple[float, float]] = {}            # (leg, minute) → (best high, best low) since fill
+        self._sl0: dict[str, float | None] = {}                     # decision → its executed (original) stop
         self._basis: dict[str, tuple[float, float | None]] = {}      # pair → (checked at, basis or None)
         self._action_errs: dict[str, tuple[str, int]] = {}           # decision → (error, last reported)
         self._virtual_later: dict[str, int] = {}                     # idea → not asked again before (ms)
@@ -941,6 +943,55 @@ class Executor:
         return {"stops_level": STOPS_LEVEL_PRICE.get(inst.symbol, 0.0), "tick_size": c.get("tick_size", 0.01),
                 "volume_min": c.get("volume_min", 0.01), "volume_step": c.get("volume_step", 0.01)}
 
+    def _original_sl(self, decision_id: str) -> float | None:
+        """The stop the trade was placed with (``executed_levels.stop_loss``, execution prices), cached."""
+        if decision_id not in self._sl0:
+            with self.store._lock:
+                r = self.store._con.execute("SELECT execution_detail FROM ai_decisions WHERE id=?",
+                                            (decision_id,)).fetchone()
+            try:
+                v = ((json.loads(r[0]) if r and r[0] else {}).get("executed_levels") or {}).get("stop_loss")
+            except ValueError:
+                v = None
+            self._sl0[decision_id] = float(v) if v is not None else None
+        return self._sl0[decision_id]
+
+    def excursion_r(self, leg) -> float | None:
+        """D-055 (``desk.sl_move_min_r``): the leg's best favourable move since its fill, in R of its original stop -
+        the closed 1m candles of the analysis instrument since the fill minute (+ the basis) and the current quote
+        (a BUY on the bid, a SELL on the ask). None while it cannot be measured (no fill, stop, basis or quote)."""
+        if leg.fill is None or leg.opened_ms is None:
+            return None
+        sl0 = self._original_sl(leg.decision_id)
+        if sl0 is None or abs(leg.fill - sl0) <= 0:
+            return None
+        basis = self._live_basis(leg.pair)
+        exe = self.reg.with_role(leg.pair, "execution")[0]
+        q = self.latest_quote(exe.key, BASIS_QUOTE_MAX_MS)
+        if basis is None or q is None:
+            return None
+        now = now_ms()
+        key = (leg.key, now // MS_PER_MINUTE)
+        if key not in self._exc:
+            prim = self.reg.primary(leg.pair)
+            tf = next(t for t in prim.timeframes if t.ms == MS_PER_MINUTE) if any(
+                t.ms == MS_PER_MINUTE for t in prim.timeframes) else None
+            hi = lo = None
+            if tf is not None:
+                bars = int(min(2000, (now - leg.opened_ms) // MS_PER_MINUTE + 3))
+                fr = load_frame(self.reader(prim.key), prim, tf, bars, now)
+                m = fr.open_time >= (leg.opened_ms // MS_PER_MINUTE) * MS_PER_MINUTE if len(fr) else None
+                if m is not None and m.any():
+                    hi, lo = float(fr.high[m].max()) + basis, float(fr.low[m].min()) + basis
+            self._exc = {k: v for k, v in self._exc.items() if k[1] == key[1]}
+            self._exc[key] = (hi if hi is not None else -float("inf"), lo if lo is not None else float("inf"))
+        hi, lo = self._exc[key]
+        if leg.side == "BUY":
+            best = max(hi, q.bid) - leg.fill
+        else:
+            best = leg.fill - min(lo + (q.ask - q.bid), q.ask)   # candles are bid prices: a SELL exits on the ask
+        return max(0.0, best) / abs(leg.fill - sl0)
+
     def _live_basis(self, pair: str) -> float | None:
         """Execution mid − analysis mid now, for the model's actions and the management levels (0 when both are the
         same instrument). None — the actions and the rules that need it wait — when a quote is older than
@@ -1206,7 +1257,8 @@ class Executor:
                                 applied_today=self.actions.applied_today(pair, "model"),
                                 last_sl_change_ms=self.actions.last_sl_change_ms,
                                 deferred_legs=frozenset(k for k, r in rows.items() if r[0] == "deferred"),
-                                fixed_bracket=self._fixed_bracket(pair), profit_only=profit_only_stops(self.s, pair))
+                                fixed_bracket=self._fixed_bracket(pair), profit_only=profit_only_stops(self.s, pair),
+                                min_r=sl_move_min_r(self.s, pair), excursion_r=self.excursion_r)
             to_send = []
             for plan in gate_action(a, legs, self.model_legs.venue, ctx):
                 leg_key = plan.leg.key if plan.leg else "-"

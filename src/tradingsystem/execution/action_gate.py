@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from ..core.settings import PositionActionsCfg
-from .management import Leg, Venue
+from .management import Leg, Venue, below_min_r
 
 QUOTE_MAX_AGE_S = 30.0
 
@@ -46,6 +46,8 @@ class ActionContext:
     deferred_legs: frozenset[str] = frozenset()   # legs whose stop move of this action is already deferred
     fixed_bracket: bool = False                   # D-053: the desk keeps stop and target as placed (be_2r)
     profit_only: bool = False                     # D-055: a stop moves only to the fill (breakeven) or into profit
+    min_r: float = 0.0                            # D-055: no stop move before the trade's best move reached this R
+    excursion_r: Callable[[Leg], float | None] | None = None   # the leg's best favourable move since its fill, in R
 
 
 @dataclass
@@ -142,6 +144,12 @@ def _plan_sl(lg: Leg, sl: float, v: Venue, base: list, ctx: ActionContext) -> Le
                                                  f"or into profit - keep it, or close the trade"))
         if not in_profit:
             p.status = "rejected"                        # final: a stop on the losing side never moves
+            return p
+    if tighter and ctx.min_r > 0:                        # D-055: no stop move before the trade ran min_r R
+        wait = below_min_r(lg, ctx.min_r, ctx.excursion_r)
+        checks.append(("sl_move_min_r", wait is None, wait or f"the trade's best move reached {ctx.min_r:g} R"))
+        if wait is not None:
+            p.status = "rejected"                        # the model may ask again once the trade has run
             return p
     price = v.bid if buy else v.ask                      # a BUY's stop triggers on the bid, a SELL's on the ask
     side_ok = sl < price if buy else sl > price
