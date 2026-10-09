@@ -245,8 +245,8 @@ def test_a_live_desk_with_unknown_holdings_keeps_its_review_calls(desk, monkeypa
 def test_the_live_brief_is_versioned_small_and_says_the_live_rules():
     from tradingsystem.ai.prompts import _read_versioned
     text, name, version = _read_versioned("desks/xau_live.md")
-    assert (name, version) == ("desks/xau_live", 4)          # v4 = B again (D-054: the model manages, like v2)
-    assert len(text) / 3.6 <= 900                          # ≈ 840 tokens in the cached system prompt
+    assert (name, version) == ("desks/xau_live", 5)          # v5 = H (D-055: journal, reviews, re-entry, 1.5 R)
+    assert len(text) / 3.6 <= 2000                         # ≈ 1860 tokens (v5: the journal legend, the re-entry rules)
     assert "15:00 New York" in text and "holiday close" in text
     assert "SENT" in text and "15 %" in text and "30 %" in text and "16:30 New York" in text
     assert "never widen" in text and "NO_TRADE" in text and "fixed bracket" not in text
