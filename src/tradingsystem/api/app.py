@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from ..ai.budget import usage_db
+from ..ai.store import journal_from
 from ..analysis.registry import capability_matrix
 from ..core.adaptive import MAX_YAML_CHARS, has_alias
 from ..core.instruments import InstrumentRegistry
@@ -377,6 +378,21 @@ def create_app(s: Settings) -> FastAPI:
                 con, "SELECT * FROM position_actions WHERE pair=? ORDER BY id DESC LIMIT ?", (pair, n)),
                 "requested", "detail")
             out["management_state"] = _management_state(con, pair, n)
+        return _plain(out)
+
+    @app.get("/api/journal/{pair}")
+    def journal(pair: str, hours: int = 168, limit: int = 50) -> dict:
+        """D-055: the desk's trade journal as the model reads it (``store.journal_from``, read-only) over ``hours``
+        (at most ``limit`` trades): fill, stop and target, every stop change and why, how it ended, the model's own
+        ``trade_review`` of it; today's closes; the latest lessons. Empty when the pair traded nothing."""
+        if pair not in pair_names:
+            raise HTTPException(404, "unknown pair")
+        h = max(1, min(int(hours), 24 * 90))
+        out: dict[str, Any] = {"pair": pair, "hours": h, "trades": []}
+        if not app_db.exists():
+            return out
+        with _ro(app_db) as con:
+            out.update(journal_from(con, pair, now_ms(), h, _limit(limit, 200), 20))
         return _plain(out)
 
     @app.get("/api/position_actions")

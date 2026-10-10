@@ -78,6 +78,21 @@ def test_the_journal_never_shows_what_had_not_happened_at_the_cycle_time(store):
     assert store.journal("XAUUSD", ms(8, 0) + 25 * 3_600_000) == {}   # out of the 24 h window
 
 
+def test_the_dashboard_reads_the_same_journal_read_only_over_a_longer_period(store, tmp_path):
+    import sqlite3
+
+    from tradingsystem.ai.store import journal_from
+    con = sqlite3.connect(f"file:{(tmp_path / 'app.db').as_posix()}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row                            # as the dashboard's read-only connection
+    try:
+        assert journal_from(con, "XAUUSD", ms(8, 0)) == store.journal("XAUUSD", ms(8, 0))
+        late = ms(8, 0) + 25 * 3_600_000
+        assert journal_from(con, "XAUUSD", late) == {}
+        assert journal_from(con, "XAUUSD", late, 48, 50, 20)["trades"][0]["decision"] == "10ccc308"
+    finally:
+        con.close()
+
+
 def frame(t0: int, highs, lows, closes) -> Frame:
     n = len(highs)
     ot = np.array([t0 + i * 60_000 for i in range(n)], dtype=float)

@@ -57,6 +57,7 @@ document.querySelectorAll("#tabs button").forEach((b) =>
     if (b.dataset.tab === "performance") loadPerformance();
     if (b.dataset.tab === "health") loadEvents();
     if (b.dataset.tab === "charts" && !chart) loadChart();
+    if (b.dataset.tab === "journal") loadJournal();
     if (b.dataset.tab === "operator") loadOperator();
     if (b.dataset.tab === "tuning") loadTuning();
     if (b.dataset.tab === "proposals") loadProposals();
@@ -380,6 +381,40 @@ async function loadOperator() {
   renderCharts(box.querySelector(".charts-strip"), d.charts || []);
 }
 
+/* D-055: the trade journal (closed and open trades, stop changes, the model's own review) - text only, via esc() */
+async function loadJournal() {
+  const pair = $("#jr-pair").value, box = $("#jr-body");
+  if (!pair) return;
+  let j;
+  try { j = await api(`/api/journal/${encodeURIComponent(pair)}?hours=${encodeURIComponent($("#jr-hours").value)}&limit=100`); } catch (e) { return showError(box, e); }
+  const trades = j.trades || [];
+  const closed = trades.filter((t) => t.status === "closed");
+  const wins = closed.filter((t) => (t.pnl_usd || 0) > 0).length;
+  const pnl = closed.reduce((a, t) => a + (t.pnl_usd || 0), 0);
+  const cls = (v) => (v > 0 ? "pass" : v < 0 ? "fail" : "muted");
+  const changes = (t) => (t.changes || []).map((c) => `<div>${esc(String(c.at || "").slice(5, 16))} · ${c.stop ? `stop ${esc(c.stop[0])} → ${esc(c.stop[1])}` : esc(c.action)} · ${esc(c.by)}${c.why ? ` · ${esc(txt(c.why, 140))}` : ""}</div>`).join("")
+    + (t.stop_changes_refused ? `<div class="muted">${esc(t.stop_changes_refused)} stop change(s) refused</div>` : "");
+  const review = (r) => (r ? `<div><b>cause:</b> ${esc(txt(r.cause, 300))}</div>${r.lesson ? `<div><b>lesson:</b> ${esc(txt(r.lesson, 300))}</div>` : ""}
+    ${r.idea_alive != null ? `<div class="muted">idea alive: ${esc(r.idea_alive)}${r.re_entry ? ` · re-entry ${esc(txt(r.re_entry, 160))}` : ""}</div>` : ""}` : `<span class="muted">—</span>`);
+  const rows = trades.slice().reverse().map((t) => `<tr><td>${esc(String(t.placed || "").slice(0, 16).replace("T", " "))}</td>
+    <td>${esc(t.side)} <span class="small muted">${esc(t.order_type)}</span><div class="small muted">${esc(t.decision)}</div></td>
+    <td>${esc(t.entry ?? "—")}</td><td>${esc(t.stop ?? "—")} / ${esc(t.target ?? "—")}</td>
+    <td>${stateSpan(t.status)}${t.exit ? `<div class="small muted">${esc(t.exit)} ${esc(t.exit_price ?? "")} · ${esc(String(t.closed || "").slice(5, 16))}</div>` : ""}${t.price_after ? `<div class="small muted">after: ${esc(txt(t.price_after, 80))}</div>` : ""}</td>
+    <td class="${cls(t.r)}">${t.r != null ? esc(t.r) : "—"}</td><td class="${cls(t.pnl_usd)}">${t.pnl_usd != null ? num(t.pnl_usd) : "—"}</td>
+    <td class="small">${changes(t) || `<span class="muted">—</span>`}</td><td class="small">${review(t.review)}</td></tr>`);
+  box.innerHTML = `
+    <div class="cards kpis">
+      <div class="card"><div class="v">${trades.length}</div><div class="l">trades (${esc(j.hours)} h)</div></div>
+      <div class="card"><div class="v">${closed.length} · ${wins}</div><div class="l">closed · won</div></div>
+      <div class="card"><div class="v ${cls(pnl)}">${num(pnl)}</div><div class="l">closed P&amp;L $</div></div>
+      ${j.today ? `<div class="card"><div class="v">${esc(j.today.closed)} · ${esc(j.today.losses)} · <span class="${cls(j.today.pnl_usd)}">${num(j.today.pnl_usd)}</span></div><div class="l">today: closed · losses · $</div></div>` : ""}
+    </div>
+    <h2>Lessons (the model's own, latest last)</h2>
+    ${(j.lessons || []).length ? `<ol class="small">${j.lessons.map((l) => `<li>${esc(txt(l, 400))}</li>`).join("")}</ol>` : `<p class="muted small">No lesson yet.</p>`}
+    <h2>Trades (newest first)</h2>
+    ${grid(["placed (UTC)", "side", "entry", "stop / target", "status", "R", "P&L $", "stop changes", "the model's review"], rows, "No executed trade in this period.")}`;
+}
+
 function tuningPair(pair, x, changes) {
   const valid = x.valid === true ? `<span class="pass">accepted by the services</span>`
     : x.valid === false ? `<span class="fail">INVALID — the services keep their last good values</span>`
@@ -505,6 +540,10 @@ async function killSwitchNow() {
   $("#dec-pair").innerHTML += PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");
   $("#op-pair").innerHTML = PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");
   $("#op-pair").addEventListener("change", loadOperator);
+  $("#jr-pair").innerHTML = PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");
+  $("#jr-pair").addEventListener("change", loadJournal);
+  $("#jr-hours").addEventListener("change", loadJournal);
+  $("#jr-refresh").addEventListener("click", loadJournal);
   $("#dec-pair").addEventListener("change", loadDecisions);
   $("#dec-refresh").addEventListener("click", loadDecisions);
   initChartControls();

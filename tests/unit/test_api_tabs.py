@@ -126,6 +126,26 @@ def seed(env) -> dict:
     return {"now": now, "playbook": playbook}
 
 
+# ---------------------------------------------------------------------- Journal (D-055)
+def test_journal_tab_reads_the_desks_trade_journal(env):
+    assert env.client.get("/api/journal/XAUUSD").json() == {"pair": "XAUUSD", "hours": 168, "trades": []}
+    now = now_ms()
+    store = DecisionStore(env.db)
+    ex = {"executed_levels": {"entry": 4133.6, "stop_loss": 4143.6, "take_profits": [4113.4]},
+          "backend": {"ok": True, "placed": [{"price": 4132.6, "volume": 0.01}]}}
+    store._con.execute("INSERT INTO ai_decisions (id, ts, pair, mode, status, decision, order_type, execution_state, "
+                       "execution_detail) VALUES (?,?,?,?,?,?,?,?,?)",
+                       ("j1" + "0" * 30, now - 30 * HOUR, "XAUUSD", "demo", "valid", "SELL", "MARKET", "executed",
+                        json.dumps(ex)))
+    store._con.commit()
+    store._con.close()
+    d = env.client.get("/api/journal/XAUUSD").json()
+    assert d["hours"] == 168 and [t["decision"] for t in d["trades"]] == ["j1000000"]
+    assert (d["trades"][0]["entry"], d["trades"][0]["stop"], d["trades"][0]["status"]) == (4132.6, 4143.6, "open")
+    assert env.client.get("/api/journal/XAUUSD?hours=24").json()["trades"] == []        # outside the period
+    assert env.client.get("/api/journal/NOPE").status_code == 404
+
+
 # ---------------------------------------------------------------------- Operator
 def test_operator_tab_shows_memory_model_actions_system_actions_rules_and_charts(env):
     seed(env)
