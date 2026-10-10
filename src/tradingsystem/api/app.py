@@ -57,7 +57,7 @@ WEB = PROJECT_ROOT / "web"
 log = logging.getLogger("api")
 
 # Phase 4 file reads: bounded, so a runaway file cannot stall the API or the browser
-REVIEW_NAME_RE = re.compile(r"\d{8}T\d{6}Z?_(daily|weekly|diagnose|adhoc)(\.session)?\.(md|json)")
+REVIEW_NAME_RE = re.compile(r"\d{8}T\d{6}Z?_(daily|weekly|diagnose|adhoc|live)(\.session)?\.(md|json)")   # live: tools/live_report.py
 MAX_REVIEW_BYTES = 512 * 1024          # a session.json with the CLI's result can be large
 MAX_REVIEWS_LISTED = 500
 MAX_YAML_BYTES = 4 * MAX_YAML_CHARS    # UTF-8: a file past this surely has more characters than the services accept

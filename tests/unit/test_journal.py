@@ -93,6 +93,21 @@ def test_the_dashboard_reads_the_same_journal_read_only_over_a_longer_period(sto
         con.close()
 
 
+def test_the_daily_live_report_lists_the_days_trades_and_their_reviews(store, tmp_path):
+    import datetime as dt
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location("ts_tools_live_report",
+                                                  Path(__file__).resolve().parents[2] / "tools" / "live_report.py")
+    lr = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lr)
+    text = lr.report(tmp_path / "app.db", dt.date(2026, 10, 7))
+    assert "**1** (تسكّرت 1، ربحت 0، خسرت 1)" in text and "**-5.63 $**" in text
+    assert "| 05:17 | بيع MARKET | 4132.57 | 4143.6 / 4113.44 | الوقف 07:32 | -0.51 | -5.63 | 07:16 4143.6→4138.2 |" in text
+    assert "`stop_moved`" in text and "smaller loss" in text
+    assert "ما في صفقات اليوم." in lr.report(tmp_path / "app.db", dt.date(2026, 10, 8))
+
+
 def frame(t0: int, highs, lows, closes) -> Frame:
     n = len(highs)
     ot = np.array([t0 + i * 60_000 for i in range(n)], dtype=float)
