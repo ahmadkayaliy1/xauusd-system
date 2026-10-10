@@ -42,7 +42,7 @@ from collections import deque
 from ..ai.budget import CostGovernor, UsageStore, usage_db
 from ..ai.orchestrator import SUSPEND_GAP_S, CycleRequest, Orchestrator, asleep_since, clock_sample
 from ..ai.store import DecisionRecord, DecisionStore
-from ..ai.triggers import decide, review_due_split, scan_setups, setup_signature
+from ..ai.triggers import TriggerDecision, decide, review_due_split, scan_setups, setup_signature
 from ..core.instruments import InstrumentRegistry
 from ..core.logsetup import setup_from_settings
 from ..core.sessions import SessionCalendar, calendar_for
@@ -309,11 +309,29 @@ class Engine:
                    decision_bar_since_last_call=last_call is None or last_dec_close > last_call,
                    move_atr=move_atr, screen_move_atr=self.s.ai.screen_move_atr,
                    weak_needs_location=self.s.ai.weak_needs_location)
+        d = self._cadence(pair, d, at_close, payload)
         self._sig = getattr(self, "_sig", {})
         if d.signature or payload:
             self._sig[pair] = sorted(d.signature)
         self._setup[pair] = (d.setup, d.setup_alone)
         return d.fire, d.reasons, d.strength
+
+    def _cadence(self, pair: str, d: TriggerDecision, at_close: bool, payload: dict | None) -> TriggerDecision:
+        """``desk.view_cadence`` of a live desk: a screen close that fired nothing still calls - every 5m close
+        (``every_5m``), or only while the pair holds a position or a pending order (``every_5m_holding``). The forced
+        look ignores the spacing (its reasons are kept), never a failure back-off; it is a 'review' while something
+        is held (it manages money at risk), an 'idle' entry call otherwise (the desk window / news rules apply)."""
+        desk = self.s.pairs[pair].desk
+        cad = desk.view_cadence if desk is not None and desk.mode == "live" else "trigger"
+        if d.fire or cad == "trigger" or not at_close or payload is None or self._backoff_ms(pair):
+            return d
+        held = bool(self._holds(pair))
+        if cad == "every_5m_holding" and not held:
+            return d
+        rest = [r for r in d.reasons if not r.startswith("spacing:")]
+        what = "the open trade / pending order" if held else "the market"
+        return TriggerDecision(True, [f"idle: the 5-minute look at {what} (desk.view_cadence)"] + rest,
+                               "review" if held else "idle", d.signature, d.setup, d.setup_alone)
 
     async def tick(self) -> None:
         now = now_ms()

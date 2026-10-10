@@ -14,7 +14,14 @@ D. Stop moves only to breakeven or into profit (D-055 candidate): every stop cha
    trade's real close the declared breakeven rule still applies (trailing is not replayed after it).
 E. A MARKET idea the gate refused only because the touch was outside its entry zone on the BETTER side (a SELL above
    the zone, a BUY below it): filled at that touch, its stop and first target, its declared breakeven rule.
-``--only D,E`` prints those sections only.
+F. A wider entry stop in a volatile market: a trade filled while the 1h ATR percentile was >= 0.8 or the 15m ADX
+   was > 40 (its decision's payload) gets a stop at least K x the 15m ATR from the fill (K = 1, 1.25, 1.5; never
+   past the 15 % gate at the run's equity), replayed as run (the run's own stop changes and closes at their times,
+   a change applied only when tighter) and as a plain bracket; the same widening on EVERY trade as the control.
+G. The entry stop beyond the nearest round number: the first multiple of STEP (5, 10, 50 USD) on the risk side of the
+   stop (or within BUF of it) moved BUF beyond it, when that is within one 15m ATR of the stop (and inside the gate) -
+   replayed as run and as a plain bracket.
+``--only D,E`` (or F, G) prints those sections only.
 
 A SELL's stop and target trigger on the ask, a BUY's on the bid (the paper backend's rule); the exit price is the
 level itself (no slippage)."""
@@ -306,6 +313,157 @@ def section_e(ticks, runs: list[Path]) -> None:
     print(f"\n(refused for a touch outside the zone on the WORSE side, left refused: {worse})\n")
 
 
+GATE_PCT = 15.0           # D-052: the risk per trade the gate allows (0.01 lot = 1 oz: USD per oz = USD of the trade)
+VOL_K = (1.0, 1.25, 1.5)
+ROUND = ((5.0, 0.5), (10.0, 0.5), (10.0, 1.0), (50.0, 0.5))      # (step, buffer)
+
+
+def _entry_context(run: Path) -> dict[str, dict]:
+    """By trade (8-char id): what its decision's payload said at the call - the 15m ATR / ADX, the 1h ATR percentile."""
+    import zlib
+    out: dict[str, dict] = {}
+    c = _db(run)
+    if c is None:
+        return out
+    try:
+        for did, pz in c.execute("select d.id, p.payload_z from ai_decisions d join ai_payloads p on "
+                                 "p.payload_hash = d.payload_hash where d.decision in ('BUY', 'SELL')"):
+            try:
+                tfs = json.loads(zlib.decompress(pz)).get("timeframes") or {}
+            except (zlib.error, ValueError, TypeError):
+                continue
+            m15, h1 = tfs.get("15m") or {}, tfs.get("1h") or {}
+            out[did[:8]] = {"atr15": (m15.get("indicators") or {}).get("atr14"),
+                            "adx15": (m15.get("indicators") or {}).get("adx14"),
+                            "pct1h": (h1.get("regime") or {}).get("atr_percentile")}
+    finally:
+        c.close()
+    return out
+
+
+def _group(name: str) -> str:
+    for pre, g in (("hl_", "H live days"), ("h_", "H / G"), ("g_", "H / G"), ("b2_", "B fixed runner"),
+                   ("claude_", "B Sept-Oct"), ("old_", "B August"), ("d053_", "D-053"), ("e_", "E")):
+        if name.startswith(pre):
+            return g
+    return "other"
+
+
+def _fair_runs(data: Path, args: list[str]) -> list[Path]:
+    runs = [Path(a) if Path(a).is_dir() else data / "backtests" / a for a in args] if args else \
+        sorted(p for p in (data / "backtests").iterdir() if p.is_dir())
+    keep = []
+    for r in runs:
+        f = r / "report.json"
+        if not f.exists() or "interrupted" in r.name or r.name.endswith("_A") or "_v1" in r.name:
+            continue
+        rep = json.loads(f.read_text(encoding="utf-8"))
+        if rep["meta"].get("answers") == "claude" and not (rep["meta"].get("result") or {}).get("interrupted"):
+            keep.append(r)
+    return keep
+
+
+def _variant_rows(ticks, runs: list[Path], stop_of) -> dict:
+    """Every closed trade of ``runs`` replayed as run and as a plain bracket with its entry stop and with
+    ``stop_of(trade, ctx, eq0)`` (None = unchanged) → {group: [n changed, as-run base, as-run variant, bracket base,
+    bracket variant, actual USD, wins base, wins variant, refused by the gate]} plus "all"."""
+    tot: dict[str, list[float]] = {}
+    for run in runs:
+        rep = json.loads((run / "report.json").read_text(encoding="utf-8"))
+        eq0 = rep["meta"].get("equity") or 107.38
+        evs, ctxs = _stop_events(run), _entry_context(run)
+        g = _group(run.name)
+        for t in rep["trades"]:
+            if not t.get("filled") or t.get("open"):
+                continue
+            side, entry, sl0 = t["side"], t["fill"], t["sl"]
+            tp = (t.get("tps") or [None])[0]
+            t_in = _ms(t["fill_time"])
+            new = stop_of(t, ctxs.get(t["id"]) or {}, eq0)
+            for key in (g, "all"):
+                row = tot.setdefault(key, [0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0])
+                row[5] += t["pnl_usd"]
+            if new == "gate":
+                for key in (g, "all"):
+                    tot[key][8] += 1
+                new = None
+            mine = evs.get(t["id"], [])
+            base = replay(ticks, side, entry, sl0, tp, t_in, mine, profit_only=False)
+            bb = bracket(ticks, side, entry, sl0, tp, t_in)
+            if new is None or abs(new - sl0) < 0.005:
+                var, bv = base, bb
+            else:
+                var = replay(ticks, side, entry, new, tp, t_in, mine, profit_only=False)
+                bv = bracket(ticks, side, entry, new, tp, t_in)
+            for key in (g, "all"):
+                row = tot[key]
+                row[0] += var is not base
+                row[1] += base[1]
+                row[2] += var[1]
+                row[3] += bb[1]
+                row[4] += bv[1]
+                row[6] += base[1] > 0
+                row[7] += var[1] > 0
+    return tot
+
+
+def _print_variant(title: str, tot: dict) -> None:
+    print(f"### {title}\n")
+    print("| group | trades changed | actual USD | as run: base | as run: variant | diff | bracket: base | "
+          "bracket: variant | diff | wins base → variant | gate kept |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
+    for g in sorted(tot, key=lambda k: (k == "all", k)):
+        n, a, av, b, bv, act, wb, wv, gate = tot[g]
+        print(f"| {g} | {int(n)} | {act:+.2f} | {a:+.2f} | {av:+.2f} | **{av - a:+.2f}** | {b:+.2f} | {bv:+.2f} | "
+              f"{bv - b:+.2f} | {int(wb)} → {int(wv)} | {int(gate)} |")
+    print()
+
+
+def _gate_ok(entry: float, stop: float, eq0: float) -> bool:
+    return abs(entry - stop) / eq0 * 100 <= GATE_PCT
+
+
+def section_f(ticks, runs: list[Path]) -> None:
+    print("## F. A wider entry stop in a volatile market (1h ATR percentile >= 0.8 or 15m ADX > 40)\n")
+    for only_vol in (True, False):
+        for k in VOL_K:
+            def stop_of(t, c, eq0, k=k, only_vol=only_vol):
+                atr = c.get("atr15")
+                if not atr:
+                    return None
+                vol = (c.get("pct1h") or 0) >= 0.8 or (c.get("adx15") or 0) > 40
+                if only_vol and not vol:
+                    return None
+                sell, entry, sl0 = t["side"] == "SELL", t["fill"], t["sl"]
+                if abs(entry - sl0) >= k * atr:
+                    return None
+                new = entry + k * atr if sell else entry - k * atr
+                return round(new, 2) if _gate_ok(entry, new, eq0) else "gate"
+            _print_variant(f"stop >= {k:g} x 15m ATR - {'volatile trades only' if only_vol else 'EVERY trade (control)'}",
+                           _variant_rows(ticks, runs, stop_of))
+
+
+def section_g(ticks, runs: list[Path]) -> None:
+    import math
+    print("## G. The entry stop beyond the nearest round number (within one 15m ATR of the stop)\n")
+    for step, buf in ROUND:
+        def stop_of(t, c, eq0, step=step, buf=buf):
+            atr = c.get("atr15")
+            sell, entry, sl0 = t["side"] == "SELL", t["fill"], t["sl"]
+            if sell:
+                r = math.ceil((sl0 - buf) / step) * step
+                new = r + buf
+            else:
+                r = math.floor((sl0 + buf) / step) * step
+                new = r - buf
+            if not atr or abs(new - sl0) > atr or abs(new - sl0) < 0.005:
+                return None
+            if (new < sl0) if sell else (new > sl0):     # never tighter than the model's stop
+                return None
+            return round(new, 2) if _gate_ok(entry, new, eq0) else "gate"
+        _print_variant(f"round step {step:g} USD, {buf:g} beyond", _variant_rows(ticks, runs, stop_of))
+
+
 def main(argv: list[str]) -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -324,6 +482,13 @@ def main(argv: list[str]) -> int:
     if only:
         runs = [Path(a) if Path(a).is_dir() else data / "backtests" / a for a in argv]
         runs = [r for r in runs if (r / "report.json").exists()]
+        if only & {"F", "G"}:                # no run named: every finished, uninterrupted claude run of the folder
+            fair = _fair_runs(data, argv)
+            print(f"(runs: {len(fair)} - {', '.join(r.name for r in fair)})\n")
+            if "F" in only:
+                section_f(ticks, fair)
+            if "G" in only:
+                section_g(ticks, fair)
         if "D" in only:
             section_d(ticks, runs)
         if "E" in only:

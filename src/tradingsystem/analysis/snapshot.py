@@ -55,6 +55,7 @@ RECENT_GAP_BARS = 16            # a gap this close to the decision bar blocks th
 # timeframe → (bars analysed, recent candles shown)
 TF_PLAN: dict[str, tuple[int, int]] = {"1w": (80, 6), "1d": (200, 10), "4h": (240, 12), "1h": (300, 12),
                                        "15m": (320, 16), "5m": (300, 12), "1m": (240, 10)}
+PLUS_RECENT = {"5m": 20}        # desk.view_plus: the last 20 closed 5m candles (the model view keeps them all)
 
 
 def _mid(q: dict | None) -> float | None:
@@ -372,10 +373,14 @@ class SnapshotBuilder:
         rd = self.reader(primary)
         tfs = [t for t in (timeframes or list(TF_PLAN)) if Timeframe.parse(t) in primary.timeframes]
         frames = {t: load_frame(rd, primary, Timeframe.parse(t), TF_PLAN[t][0], as_of, cal) for t in tfs}
-        per_tf = {t: self._analyze_tf(frames[t], d, TF_PLAN[t][1], primary.venue == "mt5") for t in tfs}
+        plus = pcfg.desk is not None and pcfg.desk.view_plus
+        per_tf = {t: self._analyze_tf(frames[t], d, PLUS_RECENT.get(t, TF_PLAN[t][1]) if plus else TF_PLAN[t][1],
+                                      primary.venue == "mt5") for t in tfs}
         dec_tf = pcfg.decision_timeframe.value
         dec_atr = ((per_tf.get(dec_tf) or {}).get("indicators") or {}).get("atr14")
         market = self._market(pair, primary, execu, frames.get("1m"), as_of, exec_cal, d, dec_atr)
+        if plus and (reg := ctx.regime_label(per_tf)) is not None:
+            market["regime"] = reg
         cross = self._cross_block(pair, frames.get("15m"), as_of)
         if cross is not None:
             market["cross"] = cross
@@ -399,7 +404,8 @@ class SnapshotBuilder:
         payload = {
             "meta": {"pair": pair, "as_of": iso(as_of), "decision_timeframe": dec_tf,
                      "price_reference": primary.key, "execution_instrument": execu.key,
-                     "payload_version": PAYLOAD_VERSION, "config_hash": self.s.config_hash},
+                     "payload_version": PAYLOAD_VERSION, "config_hash": self.s.config_hash,
+                     **({"view_keep_recent": dict(PLUS_RECENT)} if plus else {})},
             "account": self._account(account, execu, dec_atr,
                                      ((market.get("execution") or {}).get("costs") or {}).get("min_stop_distance"), d,
                                      price=_mid(market.get("execution"))),

@@ -85,6 +85,7 @@ def main(argv: list[str] | None = None) -> int:
                     help="another desk setting for this run (repeatable), e.g. sl_moves=profit_only journal=true (D-055)")
     ap.add_argument("--mgmt", default="", help="replay/production: a management variant, e.g. be_r=1.5,tp_r=2 (be_r=0: "
                                                "no breakeven)")
+    ap.add_argument("--charts", help="another chart set for this run, e.g. 1h,15m,5m (default: the config's six)")
     ap.add_argument("--keep-market", action="store_true")
     ap.add_argument("--data", default=str(REAL_DATA), help="the real data root (read only); default this checkout's")
     a = ap.parse_args(argv)
@@ -120,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
                    max_calls=a.max_calls, news=a.news, news_archive=archive, brief=a.brief, mgmt=mgmt,
                    desk_management=a.desk_management, desk=desk)
     rc.ai = {**rc.ai, "daily_calls_per_pair": a.calls_per_day}
+    if a.charts:
+        rc.ai["charts_timeframes"] = [t.strip() for t in a.charts.split(",") if t.strip()]
     run_id = a.run_id or run_id_for(rc)
     run_root = real / "backtests" / run_id
     if run_root.exists():
@@ -144,8 +147,11 @@ def main(argv: list[str] | None = None) -> int:
             "answers": a.answers, "source": str(source) if source else None, "equity": a.equity, "news": a.news,
             "max_calls": a.max_calls, "brief": s.pairs[rc.pair].desk.brief if s.pairs[rc.pair].desk else None,
             "mgmt": mgmt or None,
-            "desk": ({k: getattr(s.pairs[rc.pair].desk, k) for k in ("management", "sl_moves", "journal")}
+            "desk": ({k: getattr(s.pairs[rc.pair].desk, k) for k in ("management", "sl_moves", "journal",
+                                                                     "sl_move_min_r", "view_cadence", "view_plus")}
                      if s.pairs[rc.pair].desk else None),
+            "charts": list(s.ai.charts.timeframes) if s.ai.charts.enabled else [],
+            "calls_per_day": s.ai.daily_calls_per_pair,
             "result": result}
     doc = report.write(run_root, s, meta, source)
     try:

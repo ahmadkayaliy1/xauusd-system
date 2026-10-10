@@ -150,6 +150,34 @@ def regime(high: F, low: F, close: F) -> dict:
             "volatility": vol}
 
 
+def regime_label(per_tf: dict[str, dict]) -> dict | None:
+    """One market-regime label computed in code from the 1h / 15m (and 4h) ``regime`` blocks - a fact for the model,
+    never a signal (2026-10-10 data test, ``desk.view_plus``): "strong trend down", "trend up", "range", "1h trend up,
+    15m against it (pullback or turn)" or "mixed"; the volatility from the 1h ATR percentile; ``basis`` = the numbers.
+    None without the 1h and 15m blocks."""
+    h1 = (per_tf.get("1h") or {}).get("regime") or {}
+    m15 = (per_tf.get("15m") or {}).get("regime") or {}
+    h4 = (per_tf.get("4h") or {}).get("regime") or {}
+    if not h1.get("trend_strength") or not m15.get("trend_strength"):
+        return None
+    trending = {"trend", "strong_trend"}
+    d1, d15 = h1.get("di_direction"), m15.get("di_direction")
+    if h1["trend_strength"] in trending and m15["trend_strength"] in trending and d1 == d15:
+        label = f"{'strong trend' if h1['trend_strength'] == 'strong_trend' else 'trend'} {d1}"
+    elif h1["trend_strength"] == "range" and m15["trend_strength"] == "range":
+        label = "range"
+    elif h1["trend_strength"] in trending and d15 and d15 != d1:
+        label = f"1h trend {d1}, 15m against it (pullback or turn)"
+    else:
+        label = "mixed"
+    basis = "; ".join(f"{tf} ADX {r.get('adx')} DI {r.get('di_direction')} ATR pct {r.get('atr_percentile')}"
+                      for tf, r in (("4h", h4), ("1h", h1), ("15m", m15)) if r)
+    out = {"label": label, "volatility": h1.get("volatility"), "basis": basis, "source": "code (ADX / DI / ATR)"}
+    if (m15.get("adx") or 0) > 40:
+        out["note"] = "15m ADX above 40: an extended, fast move"
+    return out
+
+
 def ema_stack(close: F) -> dict:
     e20, e50, e200 = ind.ema(close, 20), ind.ema(close, 50), ind.ema(close, 200)
     v = lambda x: None if np.isnan(x[-1]) else float(x[-1])  # noqa: E731

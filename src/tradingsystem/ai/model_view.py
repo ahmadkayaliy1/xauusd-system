@@ -77,7 +77,7 @@ def _row(d: dict, cols: tuple[str, ...]) -> list:
     return [(int(d[c]) if isinstance(d.get(c), bool) else d.get(c)) for c in cols]
 
 
-def _timeframe(tf: str, t: dict, trim: bool = True) -> dict:
+def _timeframe(tf: str, t: dict, trim: bool = True, keep: dict[str, int] | None = None) -> dict:
     t = dict(t)
     q = t.pop("quality", None) or {}
     t.pop("recent_columns", None)
@@ -89,8 +89,9 @@ def _timeframe(tf: str, t: dict, trim: bool = True) -> dict:
         if isinstance(t["data"].get("gaps"), list):          # [start_ms, missing_bars] -> [time, missing_bars]
             t["data"]["gaps"] = [[iso(int(g[0])), g[1]] if isinstance(g, (list, tuple)) and g else g
                                  for g in t["data"]["gaps"]]
-    if "recent" in t and tf in RECENT and trim:
-        t["recent"] = t["recent"][-RECENT[tf]:]
+    keep = keep or RECENT
+    if "recent" in t and tf in keep and trim:
+        t["recent"] = t["recent"][-keep[tf]:]
     st = t.get("structure")
     if isinstance(st, dict) and st.get("events"):
         t["structure"] = {**st, "events": [_row(e, EVENT_COLS) for e in st["events"]]}
@@ -117,13 +118,14 @@ def model_view(payload: dict) -> dict:
     as_of = str(meta.get("as_of") or "")
     year = as_of[:4]
     meta["view_version"] = VIEW_VERSION
+    keep = {**RECENT, **(meta.pop("view_keep_recent", None) or {})}    # desk.view_plus: more 5m candles
     out: dict[str, Any] = {}
     for k, v in payload.items():
         if k == "meta":
             continue
         if k in ("timeframes", "timeframe") and isinstance(v, dict):   # a single-TF analyst slice keeps its candles
-            v = {tf: (_timeframe(tf, t, trim=k == "timeframes") if isinstance(t, dict) else t) for tf, t in v.items()
-                 if not (k == "timeframes" and tf in VIEW_DROP_TFS)}
+            v = {tf: (_timeframe(tf, t, trim=k == "timeframes", keep=keep) if isinstance(t, dict) else t)
+                 for tf, t in v.items() if not (k == "timeframes" and tf in VIEW_DROP_TFS)}
         elif k == "capabilities" and isinstance(v, dict):
             v = _capabilities(v)
         elif k == "account" and isinstance(v, dict):

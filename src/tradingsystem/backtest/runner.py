@@ -162,10 +162,18 @@ def run_settings(config: Path, run_root: Path, rc: RunConfig) -> Settings:
         base = upd.get("desk", pc.desk)
         upd["desk"] = type(base).model_validate({**base.model_dump(), **rc.desk})   # validated: a bad key is refused
     pairs = {**s.pairs, rc.pair: pc.model_copy(update=upd)}
+    ai = s.ai.model_copy(update={k: v for k, v in rc.ai.items() if k != "charts_timeframes"})
+    if rc.ai.get("charts_timeframes"):           # a chart-set A/B (the 2026-10-10 data test): e.g. 1h, 15m, 5m only
+        ai = ai.model_copy(update={"charts": ai.charts.model_copy(update={"timeframes": list(rc.ai["charts_timeframes"])})})
+    prov = ai.providers.get(ai.active_provider)
+    if prov is not None and prov.rpd and prov.rpd < ai.daily_calls_per_pair + 40:
+        # the provider's daily cap follows a run cap above it (a 5-minute cadence run asks ~280 times a day)
+        ai = ai.model_copy(update={"providers": {**ai.providers, ai.active_provider: prov.model_copy(
+            update={"rpd": ai.daily_calls_per_pair + 40})}})
     s = s.model_copy(update={
         "paths": PathsCfg(data_dir=str(run_root / "data"), logs_dir=str(run_root / "logs"), instance=rc.pair),
         "execution": s.execution.model_copy(update={"mode": "paper", "trigger": "auto", "paper_equity": rc.equity}),
-        "ai": s.ai.model_copy(update=rc.ai),
+        "ai": ai,
         "notify": s.notify.model_copy(update={"enabled": False, "toast": False, "telegram": False}),
         "pairs": pairs})
     if s.execution.mode != "paper":

@@ -283,6 +283,13 @@ class DeskCfg(_Model):
     # "breakeven too early" six times in a day; the tick replay of every B / G trade (Aug, Sept, Oct) at 1.5 R:
     # August +13.00 → +17.72, Sept-Oct +117.82 → +197.61, G +125.74 → +211.46
     sl_move_min_r: float = Field(0.0, ge=0.0, le=5.0)
+    # live: how often the model looks (2026-10-10 test). "trigger" = on setups, events and its own next_review (the
+    # spacing rules); "every_5m" = every 5m close as well; "every_5m_holding" = every 5m close while the pair holds a
+    # position or a pending order, on triggers otherwise. A forced look ignores the spacing, never a failure back-off
+    view_cadence: Literal["trigger", "every_5m", "every_5m_holding"] = "trigger"
+    # live (2026-10-10 data test): the payload adds ``market.regime`` (a label computed in code from the 1h / 15m / 4h
+    # ADX, DI and ATR percentile) and the last 20 closed 5m candles (12 otherwise)
+    view_plus: bool = False
 
     @model_validator(mode="after")
     def _check(self) -> "DeskCfg":
@@ -566,7 +573,7 @@ class AICfg(_Model):
     max_parallel_calls: int = 2
     # one system per pair (D-042/D-043): the provider's rpd counts every instance through one shared ledger, and one
     # pair may make at most this many calls a day (every attempt counts: first calls, repairs, escalations)
-    daily_calls_per_pair: int = Field(40, ge=10, le=120)
+    daily_calls_per_pair: int = Field(40, ge=10, le=400)       # 400: room for desk.view_cadence (a look every 5 min)
     event_calls_per_day: int = Field(6, ge=0, le=20)     # calls woken by fills / closes / outcomes, per pair and day
     screen_timeframe: str = "5m"            # Python screens every close of this TF; Claude is called only on change
     screen_move_atr: float = Field(0.5, ge=0.2, le=1.0)  # a time-based review needs a move > this × ATR (or a new setup)
