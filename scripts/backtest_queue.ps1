@@ -27,6 +27,13 @@ $env:PYTHONPATH = Join-Path $root 'src'
 # the live system comes first: this worker and the runs it starts (they inherit it) take spare CPU only
 # (2026-10-08: the live executor's heartbeat stalled three times under two runs + the unit suite)
 try { (Get-Process -Id $PID).PriorityClass = 'BelowNormal' } catch { }
+# no idle sleep while this worker lives (2026-10-10: the PC slept 3 h mid-run and the run had to be redone) - a
+# request held by this process only (SetThreadExecutionState), the power settings are not touched; a closed lid or
+# a chosen Sleep still sleeps
+try {
+    Add-Type -Namespace BtQueue -Name Power -MemberDefinition '[DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint esFlags);'
+    [void][BtQueue.Power]::SetThreadExecutionState([uint32]'0x80000001')       # ES_CONTINUOUS | ES_SYSTEM_REQUIRED
+} catch { }
 Set-Location $root
 
 function Online {
