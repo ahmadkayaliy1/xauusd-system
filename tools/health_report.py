@@ -358,6 +358,12 @@ def systems(a: argparse.Namespace) -> tuple[list[Settings], list[str]]:
                      f"— scripts\\start.bat {p}")
     if pairs:
         return [load_settings(extra_env={INSTANCE_ENV: p}) for p in pairs], notes
+    # nothing runs and nothing should (every pair stopped by the user): report the pairs that keep their own app.db -
+    # the all-pairs base has no such tables since D-042 / D-051 (proposal 2026-10-09, review 20261009T043003Z_daily)
+    stopped = sorted(p for p in base.instances if (data / "instances" / p / "app.db").exists())
+    if stopped:
+        notes += [f"   {p}: stopped by the user (run/manual_stop) - its own data reported" for p in stopped]
+        return [load_settings(extra_env={INSTANCE_ENV: p}) for p in stopped], notes
     return [base], notes
 
 

@@ -298,6 +298,13 @@ def test_health_report_reports_the_running_systems_and_the_missing_ones(tmp_path
     assert [s.paths.instance for s in chosen] == ["BTCUSDT", "ETHUSDT"]     # ETH should run: reported, not dropped
     assert any("ETHUSDT" in n and "no supervisor runs" in n for n in notes)
     assert any("EURUSD" in n and "not in config" in n for n in notes)
+    # every pair stopped by the user, nothing running: their own data, not the empty all-pairs base (2026-10-09)
+    for p in ("BTCUSDT", "ETHUSDT"):
+        (tmp_path / "instances" / p / "run" / "manual_stop").write_text("1", encoding="utf-8")
+    monkeypatch.setattr(hr.procs, "running_supervisors", lambda older_s=None: {})
+    chosen, notes = hr.systems(a)
+    assert [s.paths.instance for s in chosen] == ["BTCUSDT", "ETHUSDT", "XAUUSD"]
+    assert sum("stopped by the user" in n for n in notes) == 3
 
 
 # ------------------------------------------------------------------ ops-7: WAL-safe migration
