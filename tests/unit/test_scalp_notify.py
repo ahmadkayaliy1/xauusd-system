@@ -93,10 +93,10 @@ def test_keys_per_hour_for_the_loop_and_per_run_for_the_button(tmp_path, monkeyp
 def test_failure_key_per_day_and_the_disabled_notifier_logs_only(tmp_path, monkeypatch):
     s = settings(tmp_path)
     monkeypatch.setattr(sv, "flush", lambda timeout_s=15.0: None)
-    before = len(nt._DEFAULT.results)
+    # notifier.results is a deque(maxlen=50): in the full suite it is already full, so compare the tail, not the length
     assert sv._fail(s, "inputs", RuntimeError("no ticks"), T) == 1
     assert sv._fail(s, "model", "provider unavailable", T + 3_600_000) == 1
-    res = list(nt._DEFAULT.results)[before:]
+    res = list(nt._DEFAULT.results)[-2:]
     assert [r["key"] for r in res] == ["scalp:fail:20261013", "scalp:fail:20261013"]       # one key a day: deduped
     assert all(r["level"] == "warn" and r["title"] == "Scalp brief failed" for r in res)
     # the suite's guard (TS_NOTIFY_DISABLE): nothing reaches the desktop or Telegram
@@ -105,6 +105,6 @@ def test_failure_key_per_day_and_the_disabled_notifier_logs_only(tmp_path, monke
     assert st["last_outcome"] == "failed:model" and st["last_error"].startswith("model: provider unavailable")
     # notify: false → a failure is logged and written to status.json, never sent
     s = settings(tmp_path, notify=False)
-    n = len(nt._DEFAULT.results)
+    last = list(nt._DEFAULT.results)[-1:]
     assert sv._fail(s, "fixture", ValueError("bad"), T) == 1
-    assert len(nt._DEFAULT.results) == n
+    assert list(nt._DEFAULT.results)[-1:] == last
