@@ -39,6 +39,24 @@ def test_expired_pending_order_is_not_filled():
     assert r["filled"] is False and r["pnl_usd"] == 0.0
 
 
+def test_a_pending_order_whose_comment_the_broker_rewrote_is_found_by_its_ticket():
+    """D-057 (2026-10-11): Windsor rewrites an expired / cancelled pending order's comment ('expired [2026.10.05
+    07:00]'), so the leg placed as ts:<id>:1 with ticket 112929516 was never found and the 10-05 SELL_LIMIT stayed
+    unsettled for a week. The ticket recorded at placement identifies it; its recorded tag stands in for the comment."""
+    gone = NS(comment="expired [2026.10.05 07:00]", magic=7, position_id=0, ticket=112929516, state=6, time_done_msc=0)
+    tickets = {112929516: f"{TAG}1"}
+    assert backend(hist=[gone]).decision_result(DID, 0, legs={f"{TAG}1"}) is None          # the old way: never final
+    r = backend(hist=[gone]).decision_result(DID, 0, legs={f"{TAG}1"}, tickets=tickets)
+    assert r["filled"] is False and r["pnl_usd"] == 0.0 and r["legs"] == 1
+    assert r["reasons"] == {"112929516": "expired"} and r["exits"][0]["comment"] == f"{TAG}1"
+    # still pending at the broker (comment rewritten there too): not final
+    still = NS(comment="whatever", ticket=112929516)
+    assert backend(orders=[still], hist=[gone]).decision_result(DID, 0, tickets=tickets) is None
+    # another system's order with the same ticket number is never ours
+    assert backend(hist=[NS(comment="expired", magic=8, position_id=0, ticket=112929516)]).decision_result(
+        DID, 0, tickets=tickets) is None
+
+
 def test_two_legs_closed_sum_profit_commission_swap():
     deals = {11: [deal(IN, SELL, 84000, 0.01, commission=-0.05), deal(OUT, BUY, 83628, 0.01, profit=3.72)],
              12: [deal(IN, SELL, 84000, 0.01, commission=-0.05), deal(OUT, BUY, 84215, 0.01, profit=-2.15, swap=-0.01)]}

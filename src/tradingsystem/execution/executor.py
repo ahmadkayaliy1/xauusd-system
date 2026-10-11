@@ -751,13 +751,17 @@ class Executor:
             con.close()
         for did, ts, pair, dj in rows:
             detail = json.loads(dj) if dj else {}
-            legs = {x["comment"] for x in ((detail.get("backend") or {}).get("placed") or []) if x.get("comment")}
+            placed = (detail.get("backend") or {}).get("placed") or []
+            legs = {x["comment"] for x in placed if x.get("comment")}
+            # D-057: the broker rewrites the comment of an expired / cancelled pending order - the ticket finds it
+            tickets = {int(x["order"]): x["comment"] for x in placed if x.get("order") and x.get("comment")}
             if now_ms() - ts > (SETTLE_LOOKBACK_DAYS - 1) * 86_400_000 and did not in self._warned:
                 self._warned.add(did)
                 log.warning("%s %s: still unsettled after %d days — polling stops soon", pair, did[:8],
                             SETTLE_LOOKBACK_DAYS - 1)
             try:
-                r = self.mt5.decision_result(did, since_s=ts // 1000 - 86_400, legs=legs or None)
+                r = self.mt5.decision_result(did, since_s=ts // 1000 - 86_400, legs=legs or None,
+                                             tickets=tickets or None)
             except Exception as exc:  # noqa: BLE001
                 log.warning("outcome of %s not readable yet: %s", did[:8], exc)
                 continue

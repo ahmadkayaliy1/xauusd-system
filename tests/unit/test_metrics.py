@@ -644,12 +644,18 @@ def test_mt5_settlement_persists_the_split(env):
     ex.appdb = AppDB(env.app_db)
     rid = env.store.save(DecisionRecord(PAIR, "agent_per_pair", "t", "valid", recommendation={"decision": "SELL"}))
     env.store.set_execution_state(rid, "executed", {"mode": "demo", "equity_at_entry": 100.0,
-                                                    "backend": {"ok": True, "placed": [{"comment": "c1"}]}})
+                                                    "backend": {"ok": True, "placed": [{"comment": "c1", "order": 9}]}})
     res = {"filled": True, "pnl_usd": 2.5, "move": 30.0, "volume": 0.01, "legs": 1, "commission": -0.04, "swap": 0.0,
            "fee": 0.0, "open_ms": 1, "close_ms": 2, "reasons": {"9": "tp"},
            "exits": [{"leg": "9", "filled": True, "reason": "tp", "close_ms": 2}]}
-    ex.mt5 = NS(decision_result=lambda did, since_s, legs=None: res)
+    seen = {}
+
+    def result(did, since_s, legs=None, tickets=None):
+        seen.update(legs=legs, tickets=tickets)
+        return res
+    ex.mt5 = NS(decision_result=result)
     ex._settle_mt5_outcomes()
+    assert seen == {"legs": {"c1"}, "tickets": {9: "c1"}}          # D-057: the placed tickets reach the backend
     row = sqlite3.connect(env.app_db).execute("SELECT outcome, outcome_detail FROM ai_decisions WHERE id=?",
                                               (rid,)).fetchone()
     od = json.loads(row[1])

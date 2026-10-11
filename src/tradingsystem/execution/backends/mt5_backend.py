@@ -569,7 +569,8 @@ class MT5Backend:
             return ()
         return value
 
-    def decision_result(self, decision_id: str, since_s: int, legs: set[str] | None = None) -> dict | None:
+    def decision_result(self, decision_id: str, since_s: int, legs: set[str] | None = None,
+                        tickets: dict[int, str] | None = None) -> dict | None:
         """A decision's real result from the broker's own records, or None while it cannot be final: a leg is
         still a pending order or an open position, a leg tag recorded at placement (``legs``) is not in the history
         yet, a position's closing deals do not yet cover its opening volume (history still syncing after a
@@ -582,20 +583,32 @@ class MT5Backend:
         terminal gives no time), ``reasons`` (leg → ``tp`` | ``sl`` | ``other`` from its last closing deal;
         ``expired`` | ``cancelled`` | ``other`` for an order that never filled) and ``exits`` (per leg: ``leg``
         (position id / order ticket — the key ``position_actions`` uses), ``comment``, ``tp_index``, ``filled``,
-        ``reason``, ``open_ms``, ``close_ms``)."""
+        ``reason``, ``open_ms``, ``close_ms``).
+
+        ``tickets`` (D-057, 2026-10-11): order ticket → the leg tag written at placement. The broker REWRITES the
+        comment of a pending order that expired or was cancelled (Windsor: ``'expired [2026.10.05 07:00]'``), so
+        such a leg is recognised by its ticket and its recorded tag stands in for the comment — the 2026-10-05
+        SELL_LIMIT stayed ``unsettled`` for a week because only the comment was searched."""
         m, prefix = self.mt5, f"ts:{decision_id[:20]}:"
+        tickets = tickets or {}
         if not self.t.healthy():
             return None
+
+        def tag(o) -> str:                                   # the leg tag: the comment, unless the broker rewrote it
+            return tickets.get(getattr(o, "ticket", None)) or o.comment
+
+        def ours(o) -> bool:
+            return o.comment.startswith(prefix) or getattr(o, "ticket", None) in tickets
         until_s = int(time.time()) + 86_400
         pending = self._ask("orders", m.orders_get())
         open_pos = self._ask("positions", m.positions_get())
         hist = self._ask("history orders", m.history_orders_get(since_s, until_s))
-        placed = [o for o in hist if self.mine(o) and o.comment.startswith(prefix)]
+        placed = [o for o in hist if self.mine(o) and ours(o)]
         pids = {o.position_id for o in placed if getattr(o, "position_id", 0)}
-        if any(o.comment.startswith(prefix) for o in pending) or \
+        if any(ours(o) for o in pending) or \
                 any(p.identifier in pids or p.comment.startswith(prefix) for p in open_pos):
             return None
-        if not placed or (legs and not legs <= {o.comment for o in placed}):
+        if not placed or (legs and not legs <= {tag(o) for o in placed}):
             return None
         pnl, move_vol, vol_out = 0.0, 0.0, 0.0
         commission = swap = fee = 0.0
@@ -621,8 +634,8 @@ class MT5Backend:
             last = max(outs, key=lambda d: (getattr(d, "time_msc", 0), getattr(d, "ticket", 0)))
             opener = next((o for o in placed if getattr(o, "ticket", None) == pid), None) or \
                 next((o for o in placed if getattr(o, "position_id", 0) == pid), None)
-            exits.append({"leg": str(pid), "comment": getattr(opener, "comment", None),
-                          "tp_index": _tp_index(getattr(opener, "comment", "")), "filled": True,
+            exits.append({"leg": str(pid), "comment": tag(opener) if opener is not None else None,
+                          "tp_index": _tp_index(tag(opener) if opener is not None else ""), "filled": True,
                           "reason": deal_reason.get(getattr(last, "reason", None), "other"),
                           "fill_price": round(p_in, 5), "close_price": round(p_out, 5),
                           "open_ms": self._utc(min(getattr(d, "time_msc", 0) or 0 for d in ins)),
@@ -631,8 +644,8 @@ class MT5Backend:
                         getattr(m, "ORDER_STATE_CANCELED", 2): "cancelled"}
         for o in placed:                         # orders that never filled: how they ended
             if not getattr(o, "position_id", 0):
-                exits.append({"leg": str(getattr(o, "ticket", None) or o.comment), "comment": o.comment,
-                              "tp_index": _tp_index(o.comment), "filled": False,
+                exits.append({"leg": str(getattr(o, "ticket", None) or tag(o)), "comment": tag(o),
+                              "tp_index": _tp_index(tag(o)), "filled": False,
                               "reason": state_reason.get(getattr(o, "state", None), "other"), "open_ms": None,
                               "close_ms": self._utc(getattr(o, "time_done_msc", 0))})
         opens = [e["open_ms"] for e in exits if e["filled"] and e["open_ms"] is not None]

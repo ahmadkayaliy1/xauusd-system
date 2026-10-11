@@ -37,22 +37,6 @@ def _dispatch(command: str, argv: list[str]) -> int:
     return int(getattr(module, func_name)(argv) or 0)
 
 
-def _run_research_script(folder: str, prefix: str, args: argparse.Namespace) -> int:
-    scripts_dir = PROJECT_ROOT / "research" / folder
-    scripts = sorted(p.stem for p in scripts_dir.glob(f"{prefix}*.py"))
-    if not args.name:
-        print(f"available {folder}:\n  " + "\n  ".join(scripts or ["(none yet)"]))
-        return 0
-    name = args.name if args.name.startswith(prefix) else f"{prefix}{args.name}"
-    path = scripts_dir / f"{name}.py"
-    if not path.exists():
-        print(f"unknown script {args.name!r}; available: {scripts}")
-        return 2
-    sys.argv = [str(path), *args.rest]
-    runpy.run_path(str(path), run_name="__main__")
-    return 0
-
-
 def _cmd_config(args: argparse.Namespace) -> int:
     from .core.instruments import InstrumentRegistry
     from .core.settings import load_settings
@@ -125,16 +109,6 @@ def build_parser() -> argparse.ArgumentParser:
                                 epilog="--instance PAIR (anywhere on the line): run as the independent system of that "
                                        "pair (config 'instances:', D-042)")
     sub = p.add_subparsers(dest="command", required=True)
-
-    pr = sub.add_parser("probe", help="run a data-exploration probe (research/probes)")
-    pr.add_argument("name", nargs="?")
-    pr.add_argument("rest", nargs=argparse.REMAINDER)
-    pr.set_defaults(func=lambda a: _run_research_script("probes", "probe_", a))
-
-    bn = sub.add_parser("bench", help="run a benchmark (research/bench), e.g. `bench storage`")
-    bn.add_argument("name", nargs="?")
-    bn.add_argument("rest", nargs=argparse.REMAINDER)
-    bn.set_defaults(func=lambda a: _run_research_script("bench", "bench_", a))
 
     cf = sub.add_parser("config", help="validate and summarise the configuration")
     cf.add_argument("--config", help="path to an alternative config.yaml")
