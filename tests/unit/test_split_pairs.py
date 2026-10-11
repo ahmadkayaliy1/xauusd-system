@@ -33,9 +33,11 @@ D052_RISK = {"max_risk_per_trade_pct": 15.0, "max_daily_loss_pct": 30.0, "max_ef
              "max_losing_trades_per_day": 3}
 D052_MONITOR = {"equity_drop_warn_pct": 15.0, "equity_drop_kill_pct": 35.0, "daily_loss_warn_margin_pct": 5.0}
 # D-053 (owner, 2026-10-06): the decision model pinned, the provider's daily cap for 120 gold calls a day
-D053_PROVIDER = {"model": "claude-sonnet-5", "rpd": 160}
-# D-055 (owner, 2026-10-09): H - the journal, stops only to breakeven or profit and not before 1.5 R
-D055_DESK = {"journal": True, "sl_moves": "profit_only", "sl_move_min_r": 1.5, "entry_votes": 1}
+D053_PROVIDER = {"model": "claude-sonnet-5", "rpd": 300}          # D-056: 300 (was 160) for the 5-min looks
+# D-055 (owner, 2026-10-09): H - the journal, stops only to breakeven or profit and not before 1.5 R; D-056
+# (2026-10-11): a look every 5 minutes while a trade / pending order is held
+D055_DESK = {"journal": True, "sl_moves": "profit_only", "sl_move_min_r": 1.5, "entry_votes": 1,
+             "view_cadence": "every_5m_holding", "view_plus": False}
 
 
 def three(inst: str | None = None):

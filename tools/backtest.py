@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--news", action="store_true",
                     help="news blackout on, from the archived real calendars (data/shared/news_archive/<NY Sunday>.json)")
     ap.add_argument("--run-id")
-    ap.add_argument("--brief", help="another desk brief for this run (prompt A/B), e.g. desks/xau_live_b")
+    ap.add_argument("--brief", help="another desk brief for this run (prompt A/B), e.g. desks/xau")
     ap.add_argument("--desk-management", choices=("model", "be_2r"),
                     help="another desk management policy for this run (the pre-D-053 'model' or 'be_2r')")
     ap.add_argument("--desk-set", action="append", default=[], metavar="KEY=VALUE",

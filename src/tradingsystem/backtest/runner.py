@@ -78,7 +78,7 @@ class RunConfig:
     max_calls: int = 150
     news: bool = False                       # the news blackout: the archived real calendar of each week (B5)
     news_archive: Path | None = None         # <data>/shared/news_archive (news.ARCHIVE_DIR): <NY Sunday>.json
-    brief: str | None = None                 # another desk brief for the run (an A/B of the prompt), e.g. desks/xau_live_b
+    brief: str | None = None                 # another desk brief for the run (an A/B of the prompt), e.g. desks/xau
     desk_management: str | None = None       # another desk management policy (model | be_2r), e.g. the pre-D-053 model
     desk: dict = field(default_factory=dict)  # other desk settings for the run, e.g. {"sl_moves": "profit_only"} (D-055)
     mgmt: dict = field(default_factory=dict)  # replay only: a management variant of the stored answers (variant())

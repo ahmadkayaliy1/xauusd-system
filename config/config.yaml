@@ -90,6 +90,8 @@ pairs:
       journal: true                  # D-055 (owner, 2026-10-09): the trade journal + trade_review in every payload
       sl_moves: profit_only          # D-055: a stop moves only to breakeven or into profit
       sl_move_min_r: 1.5             # D-055: and not before the trade's best move reached 1.5 R (H)
+      view_cadence: every_5m_holding # D-056 (2026-10-11): a look every 5 min while a trade / pending order is held
+                                     # (3 unseen days: +25.28 vs H -18.65, better on 2 of 3); flat = triggers as before
       holiday_flats:                 # the same flat before a US holiday halt / early close / closure (the session calendar
         - {date: "2026-11-26", time: "12:00", tz: America/New_York}   # knows no holidays). Conservative times (early
         - {date: "2026-11-27", time: "12:00", tz: America/New_York}   # closes are ~13:00-13:45 New York); confirm and
@@ -254,7 +256,7 @@ ai:
       structured_output: prompt        # schema in the prompt, one turn (--json-schema costs ~4-5x: D-035)
       max_concurrency: 2               # two pairs analysed at once (set 1 on 4 GB machines)
       rpm: 4
-      rpd: 160                         # daily cap (D-053: XAUUSD 120 a day + reviews/events) - keeps room for your own use
+      rpd: 300                         # daily cap (D-056: XAUUSD up to 250 a day with the 5-min looks while holding; was 160)
       timeout_s: 180                  # serialized calls: keep a 3-pair batch within risk.max_recommendation_age_s
     gemini:
       kind: gemini

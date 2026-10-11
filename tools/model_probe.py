@@ -262,7 +262,7 @@ async def _confirm(confirmer: str, label: str, proposer: str, brief: str, moment
     timeutil.set_sim_clock(None)
 
 
-async def _ask(model: str, label: str, only: str, max_n: int | None, brief: str = "desks/xau_live_b",
+async def _ask(model: str, label: str, only: str, max_n: int | None, brief: str = "desks/xau_live",
                moments_name: str = "moments.json") -> None:
     from tradingsystem.ai.orchestrator import CycleRequest
     from tradingsystem.backtest.market import prepare
@@ -573,7 +573,7 @@ def main(argv: list[str]) -> int:
         select(runs, **kw)
         return 0
     if cmd == "ask":
-        opts = {"--model": None, "--label": None, "--only": "all", "--max": None, "--brief": "desks/xau_live_b",
+        opts = {"--model": None, "--label": None, "--only": "all", "--max": None, "--brief": "desks/xau_live",
                 "--moments": "moments.json"}
         while rest:
             k = rest.pop(0)
@@ -582,7 +582,7 @@ def main(argv: list[str]) -> int:
                          brief=opts["--brief"], moments_name=opts["--moments"]))
         return 0
     if cmd == "confirm":
-        opts = {"--model": None, "--label": None, "--proposer": None, "--brief": "desks/xau_live_b",
+        opts = {"--model": None, "--label": None, "--proposer": None, "--brief": "desks/xau_live",
                 "--moments": "moments.json"}
         while rest:
             k = rest.pop(0)
