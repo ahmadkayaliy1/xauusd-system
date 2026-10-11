@@ -58,6 +58,7 @@ document.querySelectorAll("#tabs button").forEach((b) =>
     if (b.dataset.tab === "health") loadEvents();
     if (b.dataset.tab === "charts" && !chart) loadChart();
     if (b.dataset.tab === "journal") loadJournal();
+    if (b.dataset.tab === "scalp") loadScalp();
     if (b.dataset.tab === "operator") loadOperator();
     if (b.dataset.tab === "tuning") loadTuning();
     if (b.dataset.tab === "proposals") loadProposals();
@@ -519,6 +520,169 @@ async function killSwitchNow() {
   } catch (e) { alert(`Kill switch NOT confirmed: ${e.message}`); }
 }
 
+/* ------------------------------------------------------------------ D-058: the Scalp tab (the owner's manual-scalping brief)
+   Everything the model wrote (Arabic prose, level reasons, triggers) is text through esc()/txt(); the prose cells are
+   right-to-left (.ar, dir="auto"). The safety list is rendered on every load, brief or not. Loaded on click and by
+   Refresh; "Run now" POSTs like the kill switch and reloads the tab ONCE after 90 s (no polling). */
+const scBucket = (c) => (c == null ? null : Number(c) < 50 ? "<50" : Number(c) < 70 ? "50-69" : ">=70");
+const scPct = (v) => (v == null ? "—" : `${Math.round(Number(v) * 100)}%`);
+const scR = (v) => (v == null ? "—" : `${Number(v) > 0 ? "+" : ""}${Number(v).toFixed(2)}R`);
+const scHM = (ms) => (typeof ms === "number" && ms > 0 ? new Date(ms).toISOString().slice(11, 16) : "—");
+const scCls = (v) => (v > 0 ? "pass" : v < 0 ? "fail" : "muted");
+const scOutcome = (o) => `<span class="${["target", "held"].includes(o) ? "pass" : ["stop", "broken"].includes(o) ? "fail" : "muted"}">${esc(o || "—")}</span>`;
+const scList = (xs, n = 300) => (Array.isArray(xs) ? xs : []).map((x) => `<li>${esc(txt(x, n))}</li>`).join("");
+let STATUS_SC = null;                          // the last /api/scalp answer (the stats behind the code confidence)
+
+/* the code's confidence for a plan: the measured hit-rate of its confidence bucket over the scored briefs */
+function scCodeConf(stats, conf) {
+  const b = scBucket(conf), g = b && stats?.by_confidence ? stats.by_confidence[b] : null;
+  if (!g || (g.n || 0) < 5) return `<span class="muted">— <span class="small">(n=${esc(g?.n ?? 0)})</span></span>`;
+  return `${scPct(g.hit_rate)} <span class="small muted">(n=${esc(g.n)})</span>`;
+}
+
+function scChecks(c) {
+  if (!c) return `<span class="muted">—</span>`;
+  const names = ["news_ok", "desk_ok", "stop_ok", "target_ok", "level_ok", "rr_ok"];
+  const marks = names.map((k) => `<span class="${c[k] ? "pass" : (c.rejected || []).includes(k) ? "fail" : "muted"}" title="${esc(k)}">${esc(k.replace("_ok", ""))}${c[k] ? " ✓" : " ✗"}</span>`).join(" ");
+  const notes = scList(c.notes, 160);
+  return marks + (notes ? `<ul class="small muted">${notes}</ul>` : "");
+}
+
+/* one brief (the latest or a chosen one) as the page shows it; `stats` gives the code confidence per plan */
+function scBriefHTML(rec, stats) {
+  if (!rec || !rec.brief) return `<p class="muted small">No brief yet. The job writes one every hour in [${esc((STATUS_SC?.config?.hours_utc || []).join(", "))}) UTC while enabled, or on "Run now".</p>`;
+  const b = rec.brief, score = rec.score || null, checks = rec.checks || {}, desk = rec.desk || {};
+  const tok = rec.tokens || {};
+  const legs = (desk.legs || []).map((l) => `${esc(l.kind)} ${esc(l.side)} @ ${esc(l.entry)} (SL ${esc(l.sl ?? "—")} / TP ${esc(l.tp ?? "—")})`).join(" · ");
+  const deskLine = legs ? `<span class="fail">the desk holds: ${legs}</span>` : `<span class="muted">the desk holds nothing on the pair</span>`;
+  const head = `<div class="card"><div class="kv small">
+      <div>Brief</div><div><b>${esc(rec.id)}</b> · ${tSafe(rec.as_of_ms)} UTC · ${esc(rec.reason)} · ${esc(rec.model)} / ${esc(rec.effort)} · ${esc(Math.round((rec.latency_ms || 0) / 1000))}s · tokens ${esc(tok.input ?? 0)} in (${esc(tok.cached ?? 0)} cached) / ${esc(tok.output ?? 0)} out · ${esc(rec.images ?? 0)} images</div>
+      <div>Regime / bias</div><div><b>${esc(b.regime)}</b> / <b class="${b.bias === "bullish" ? "buy" : b.bias === "bearish" ? "sell" : "notrade"}">${esc(b.bias)}</b> · conf ${esc(b.bias_confidence)} ${b.no_scalp_now ? `<span class="badge kill">NO SCALP NOW</span>` : ""}</div>
+      <div>Market</div><div>price ${esc(rec.price_at ?? "—")} · ATR5m ${esc(rec.atr5m ?? "—")} · spread ${esc(rec.spread_now ?? "—")} (median ${esc(rec.spread_median ?? "—")}) · tol ${esc(rec.tol ?? "—")} ${rec.blackout ? `<span class="fail">· NEWS BLACKOUT</span>` : ""}</div>
+      <div>Desk</div><div>${deskLine} · equity ${esc(desk.equity ?? "—")} ${esc(desk.currency || "")}${desk.kill_switch ? ` · <span class="fail">kill switch ON</span>` : ""}</div>
+      <div>Score</div><div>${score ? `${esc(score.summary?.plans_n ?? 0)} plans: ${esc(score.summary?.triggered ?? 0)} triggered, ${esc(score.summary?.target_first ?? 0)} target first, ${esc(score.summary?.stop_first ?? 0)} stop first, ${esc(score.summary?.expired ?? 0)} expired · levels touched ${esc(score.summary?.levels_touched ?? 0)}, held ${esc(score.summary?.levels_held ?? 0)} · ${scR(score.summary?.sum_r)} · scored ${tSafe(rec.scored_ms)}` : `<span class="muted">not scored yet (one hour after the brief, on the real ticks)</span>`}</div>
+    </div></div>`;
+  const warn = esc(txt(b.desk_warning, 400)), note = esc(txt(b.confidence_note, 300));
+  const prose = `<h2>The picture (الصورة)</h2><p class="prewrap ar" dir="auto">${esc(b.picture)}</p>
+    <h2>What to expect (المتوقَّع)</h2><p class="prewrap ar" dir="auto">${esc(b.expect)}</p>
+    ${warn ? `<h2>The desk (تحذير النظام الآلي)</h2><p class="prewrap ar fail" dir="auto">${warn}</p>` : ""}`;
+  const lvScore = (i) => (score?.levels || [])[i] || {};
+  const levels = (b.levels || []).map((l, i) => `<tr><td><b>${esc(l.price)}</b></td><td>${esc(l.kind)}</td><td>${esc(l.timeframe)}</td><td>${esc(l.strength)}</td>
+      <td class="ar" dir="auto">${esc(txt(l.why, 220))}</td><td>${score ? `${scOutcome(lvScore(i).outcome)}${lvScore(i).touched_ms ? ` <span class="small muted">${scHM(lvScore(i).touched_ms)}</span>` : ""}` : `<span class="muted">—</span>`}</td></tr>`);
+  const plScore = (i) => (score?.plans || []).find((p) => p.idx === i) || null;
+  const plans = (b.plans || []).map((p, i) => {
+    const c = checks[String(i)] || null, rej = !!(c && (c.rejected || []).length), ps = plScore(i);
+    const out = ps ? `${scOutcome(ps.outcome)}${ps.r != null ? ` <span class="${scCls(ps.r)}">${scR(ps.r)}</span>` : ""}${ps.minutes != null ? ` <span class="small muted">${esc(Math.round(ps.minutes))}m</span>` : ""}${ps.mfe_r != null ? `<div class="small muted">mfe ${scR(ps.mfe_r)} · mae ${scR(ps.mae_r)}</div>` : ""}` : `<span class="muted">—</span>`;
+    return `<tr class="${rej ? "rejected" : ""}${Number(p.confidence) < 50 ? " conf-low" : ""}"><td>${esc(i + 1)}${rej ? `<div class="small fail">rejected</div>` : ""}</td>
+      <td class="${p.side === "BUY" ? "buy" : "sell"}"><b>${esc(p.side)}</b><div class="small muted">${esc(p.entry_type)}</div></td>
+      <td>${esc(p.level_price)}</td><td><b>${esc(p.entry)}</b></td><td>${esc(p.stop)} / ${esc(p.target)}<div class="small muted">rr ${esc(p.rr)} · hold ${esc(p.max_hold_min)}m</div></td>
+      <td><b>${esc(p.confidence)}</b></td><td>${scCodeConf(stats, p.confidence)}</td>
+      <td class="ar small" dir="auto">${esc(txt(p.trigger, 200))}</td><td class="ar small" dir="auto">${esc(txt(p.invalidation, 200))}</td>
+      <td class="small">${scChecks(c)}</td><td>${out}</td></tr>`;
+  });
+  const noScalp = scList(b.no_scalp), clock = scList(b.news_clock);
+  const events = (rec.next_events || []).slice(0, 6).map((e) => `<li>${esc(txt(Array.isArray(e) ? e.join(" · ") : e, 160))}</li>`).join("");
+  const manual = (rec.manual || []).map((t) => `<tr><td>${tSafe(t.open_ms)}</td><td class="${t.side === "BUY" ? "buy" : "sell"}">${esc(t.side)}</td><td>${esc(t.entry)}</td><td>${t.open ? `<span class="muted">open</span>` : esc(t.exit ?? "—")}</td>
+      <td>${esc(t.volume ?? "—")}</td><td class="${scCls(t.pnl_usd)}">${t.open ? "—" : num(t.pnl_usd)}</td><td>${t.followed_plan ? `<span class="pass">plan followed</span>` : `<span class="muted">—</span>`}</td><td class="small muted">${esc(txt(t.comment, 60))}</td></tr>`);
+  return `${head}${prose}
+    <h2>Levels (${esc((b.levels || []).length)})</h2>
+    ${grid(["price", "kind", "tf", "strength", "why", "outcome (60 min)"], levels, "No level.")}
+    <h2>Conditional plans (${esc((b.plans || []).length)})${b.no_scalp_now ? ` <span class="fail">· NO SCALP NOW</span>` : ""}</h2>
+    ${grid(["#", "side", "level", "entry", "stop / target", "model conf", "code conf (bucket hit-rate)", "trigger", "invalidation", "checks", "outcome"], plans, "No plan this hour - an empty list is a good answer when nothing qualifies.")}
+    ${note ? `<p class="small muted ar" dir="auto">${note}</p>` : ""}
+    <div class="two-col">
+      <div><h2>Do not scalp when (لا تسكالب إذا)</h2>${noScalp ? `<ul class="ar small" dir="auto">${noScalp}</ul>` : `<p class="muted small">—</p>`}</div>
+      <div><h2>News clock</h2>${clock ? `<ul class="ar small" dir="auto">${clock}</ul>` : `<p class="muted small">—</p>`}${events ? `<ul class="small muted">${events}</ul>` : ""}</div>
+    </div>
+    <h2>Your manual trades of that hour (${esc((rec.manual || []).length)})</h2>
+    ${grid(["opened (UTC)", "side", "entry", "exit", "lots", "P&L $", "plan", "comment"], manual, "No manual trade attributed to this brief.")}`;
+}
+
+function scSafetyHTML(d) {
+  const cap = d.risk_cap || {};
+  const items = (d.safety || []).map((x) => `<li><span class="ar" dir="auto">${esc(x.ar)}</span><div class="small muted">${esc(x.en)}</div></li>`).join("");
+  const capLine = cap.max_risk_usd != null ? `<b>≤ ${esc(num(cap.max_risk_usd))} $</b> per scalp (${esc(cap.max_risk_pct)} % of equity) · at most ${esc(cap.max_open)} manual position · daily manual loss stop ${esc(num(cap.daily_cap_usd))} $ (${esc(cap.daily_cap_pct)} %)` : `${esc(cap.max_risk_pct ?? 5)} % of equity per scalp · at most ${esc(cap.max_open ?? 1)} manual position · a ${esc(cap.daily_cap_pct ?? 10)} % daily manual loss stop (equity unknown: the executor is not reporting)`;
+  return `<h2>Same account as the desk - read before every manual trade</h2>
+    <div class="card"><p class="small">${capLine}</p>
+    <p class="small ar" dir="auto">${esc(cap.rule_ar || "")}</p>
+    <ol class="small">${items}</ol></div>`;
+}
+
+function scStatusText(d) {
+  const st = d.status || {};
+  const parts = [];
+  parts.push(d.enabled ? `<span class="pass">enabled</span>` : `<span class="fail">scalp.enabled: false - hourly runs and the button exit at once</span>`);
+  parts.push(st.pid ? `loop pid ${esc(st.pid)}` : `<span class="muted">loop not running (scripts\\start_scalp.bat)</span>`);
+  if (st.last_run_ms) parts.push(`last run ${scHM(st.last_run_ms)} ${esc(txt(st.last_outcome, 80))}`);
+  if (st.next_run_ms) parts.push(`next ${scHM(st.next_run_ms)} UTC`);
+  if (st.last_error) parts.push(`<span class="fail">${esc(txt(st.last_error, 120))}</span>`);
+  parts.push(`hours [${esc((d.config?.hours_utc || []).join(", "))}) UTC · ≤ ${esc(d.config?.max_per_day)}/day · ${esc(d.config?.model)} / ${esc(d.config?.effort)}`);
+  return parts.join(" · ");
+}
+
+async function loadScalp() {
+  const box = $("#sc-body"), status = $("#sc-status");
+  let d;
+  try { d = await api("/api/scalp?limit=30"); } catch (e) { return showError(box, e); }
+  STATUS_SC = d;
+  status.innerHTML = scStatusText(d);
+  const st = d.stats || {}, p = st.plans || {}, lv = st.levels || {}, mn = st.manual || {};
+  const kpis = `<div class="cards kpis">
+      <div class="card"><div class="v">${esc(st.n_scored ?? 0)}</div><div class="l">scored briefs (last ${esc(d.config?.stats_n ?? 20)})</div></div>
+      <div class="card"><div class="v">${esc(p.triggered ?? 0)} / ${esc(p.n ?? 0)}</div><div class="l">plans triggered / counted</div></div>
+      <div class="card"><div class="v">${scPct(p.hit_rate)}</div><div class="l">target first (${esc(p.target_first ?? 0)} vs ${esc(p.stop_first ?? 0)} stop, ${esc(p.expired ?? 0)} expired)</div></div>
+      <div class="card"><div class="v ${scCls(p.sum_r)}">${scR(p.avg_r)}</div><div class="l">avg R per triggered plan (sum ${scR(p.sum_r)})</div></div>
+      <div class="card"><div class="v">${esc(lv.held ?? 0)} / ${esc(lv.touched ?? 0)} / ${esc(lv.total ?? 0)}</div><div class="l">levels held / touched / total</div></div>
+      <div class="card"><div class="v ${scCls(mn.pnl_usd)}">${num(mn.pnl_usd ?? 0)}</div><div class="l">your manual P&amp;L $ (${esc(mn.n ?? 0)} trades, ${esc(mn.wins ?? 0)} won, ${esc(mn.followed_plan ?? 0)} on a plan)</div></div>
+    </div>`;
+  const bc = st.by_confidence || {};
+  const buckets = ["<50", "50-69", ">=70"].map((k) => `<tr><td>${esc(k)}</td><td>${esc(bc[k]?.plans ?? 0)}</td><td>${esc(bc[k]?.triggered ?? 0)}</td><td>${esc(bc[k]?.n ?? 0)}</td><td>${scPct(bc[k]?.hit_rate)}</td></tr>`);
+  const hist = (d.history || []).map((h) => `<tr data-id="${esc(h.id)}"><td>${tSafe(h.as_of_ms)}</td><td>${esc(h.reason)}</td><td>${esc(h.regime)} / ${esc(h.bias)} ${esc(h.bias_confidence)}</td>
+      <td>${h.no_scalp_now ? `<span class="fail">NO SCALP</span>` : `${esc(h.n_plans)} plans${h.n_rejected ? ` <span class="muted">(${esc(h.n_rejected)} rejected)</span>` : ""}`} · ${esc(h.n_levels)} levels</td>
+      <td>${h.score ? `${esc(h.score.triggered)} trig · ${esc(h.score.target_first)} tgt · ${esc(h.score.stop_first)} stop · <span class="${scCls(h.score.sum_r)}">${scR(h.score.sum_r)}</span> · lv ${esc(h.score.levels_held)}/${esc(h.score.levels_touched)}` : `<span class="muted">not scored</span>`}</td>
+      <td>${esc(h.n_manual || "")}</td></tr>`);
+  const manual = (d.manual_trades || []).slice(0, 30).map((t) => `<tr><td>${tSafe(t.open_ms)}</td><td class="${t.side === "BUY" ? "buy" : "sell"}">${esc(t.side)}</td><td>${esc(t.entry)}</td><td>${t.open ? `<span class="muted">open</span>` : esc(t.exit ?? "—")}</td>
+      <td>${esc(t.volume ?? "—")}</td><td class="${scCls(t.pnl_usd)}">${t.open ? "—" : num(t.pnl_usd)}</td><td class="small">${esc(t.brief_id || "—")}${t.followed_plan ? ` <span class="pass">plan followed</span>` : ""}</td></tr>`);
+  box.innerHTML = `${kpis}
+    ${scBriefHTML(d.latest, d.stats)}
+    <div class="charts-strip" id="sc-charts"></div>
+    ${scSafetyHTML(d)}
+    <h2>Hit-rate by the model's confidence (code confidence)</h2>
+    ${grid(["bucket", "plans", "triggered", "decided (n)", "target first"], buckets, "—")}
+    <h2>Your manual trades (last days, magic 0 on the pair)</h2>
+    ${grid(["opened (UTC)", "side", "entry", "exit", "lots", "P&L $", "brief"], manual, "No manual trade read from the terminal yet (the job reads deals only while MT5 runs).")}
+    <h2>Briefs (newest first - click one)</h2>
+    ${grid(["time (UTC)", "reason", "regime / bias", "plans", "score", "manual"], hist, "No brief stored yet.")}`;
+  const strip = $("#sc-charts");
+  if (strip && (d.charts || []).length) {
+    strip.innerHTML = `<h2>Charts the model received (the brief's own)</h2>` + d.charts.map((c) =>
+      `<figure class="chart-thumb"><img loading="lazy" alt="${esc(c.tf)} chart" src="/api/scalp/charts/${encodeURIComponent(c.tf)}?t=${encodeURIComponent(c.updated_ms)}"><figcaption class="small muted">${esc(c.tf)} · ${tSafe(c.updated_ms)}</figcaption></figure>`).join("");
+  }
+}
+
+async function showScalp(id) {
+  const box = $("#sc-detail");
+  box.classList.remove("hidden");
+  let r;
+  try { r = await api(`/api/scalp/${encodeURIComponent(id)}`); } catch (e) { return showError(box, e); }
+  const md = esc(r.md);
+  box.innerHTML = `<h3>Brief ${esc(r.id)} <span class="small muted">(the stored record; the latest brief stays above)</span></h3>
+    ${scBriefHTML(r.record, STATUS_SC?.stats)}
+    ${md ? `<details><summary>The brief as sent (markdown / Telegram text)</summary><pre class="review ar" dir="auto">${md}</pre></details>` : ""}
+    <details><summary>Record JSON</summary><pre>${esc(JSON.stringify(r.record, null, 1))}</pre></details>`;
+  box.scrollIntoView({ behavior: "smooth" });
+}
+
+/* one call on the scalp budget; the run applies its own gates and the tab reloads once after 90 s */
+async function runScalp() {
+  if (!confirm("Ask the model for a scalp brief now?\n\nOne call on the scalp budget (not the desk's). The run first checks scalp.enabled, the market, the daily cap, the desk's call in flight and the free RAM - status.json says what it did.\nThis tab reloads once after 90 s.")) return;
+  try {
+    const r = await api("/api/scalp/run", { method: "POST", headers: { "X-Dashboard-Token": TOKEN } });
+    alert(`Scalp run started (pid ${r.pid}).\n${r.note}`);
+    setTimeout(loadScalp, 90_000);
+  } catch (e) { alert(`Scalp run NOT started: ${e.message}`); }
+}
+
 /* ------------------------------------------------------------------ boot */
 (async function boot() {
   // one delegated listener each: survives re-renders (no per-render re-binding)
@@ -536,6 +700,12 @@ async function killSwitchNow() {
   $("#tu-refresh").addEventListener("click", loadTuning);
   $("#pr-refresh").addEventListener("click", loadProposals);
   $("#rv-refresh").addEventListener("click", loadReviews);
+  $("#sc-refresh").addEventListener("click", loadScalp);
+  $("#sc-run").addEventListener("click", runScalp);
+  $("#sc-body").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-id]");
+    if (tr) showScalp(tr.dataset.id);
+  });
   PAIRS = await api("/api/pairs");
   $("#dec-pair").innerHTML += PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");
   $("#op-pair").innerHTML = PAIRS.map((p) => `<option>${esc(p.pair)}</option>`).join("");

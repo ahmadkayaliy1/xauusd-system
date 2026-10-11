@@ -77,3 +77,9 @@ pre.review { max-height: 70vh; white-space: pre-wrap; overflow-wrap: anywhere; f
 .review-layout .detail { margin-top: 0; }
 #tu-flags { align-self: center; }
 @media (max-width: 900px) { .review-layout, .pair-block .two-col { grid-template-columns: minmax(0, 1fr); } }
+
+/* D-058: the Scalp tab - Arabic prose right-to-left, a plan the code rejected greyed, a low confidence muted */
+#tab-scalp td { overflow-wrap: anywhere; min-width: 0; }
+.ar { direction: rtl; text-align: right; }
+.conf-low { color: var(--muted); }
+.rejected { opacity: .55; }

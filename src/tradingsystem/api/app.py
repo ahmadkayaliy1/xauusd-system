@@ -14,6 +14,9 @@
   migrated yet (missing table or column → empty); files are read whole and briefly (never a FileResponse: a held
   handle makes ``os.replace`` by tune.py / the review runner fail on Windows), and a file name never comes from the
   request (reviews are served only when the name matches the review pattern *and* is in the directory listing).
+* D-058: the Scalp tab — ``GET /api/scalp`` reads the scalp job's files under ``data/scalp`` (the same bounded
+  whole-file reads), ``POST /api/scalp/run`` starts one detached ``tools/scalp_brief.py --once`` (token + Origin like
+  the kill switch; the run applies its own gates), ``/api/scalp/charts/{tf}`` serves its own chart images.
 """
 from __future__ import annotations
 
@@ -44,11 +47,15 @@ from ..ai.budget import usage_db
 from ..ai.store import journal_from
 from ..analysis.registry import capability_matrix
 from ..core.adaptive import MAX_YAML_CHARS, has_alias
+from ..core.filelock import FileLock
 from ..core.instruments import InstrumentRegistry
 from ..core.killswitch import read_reason, set_kill_switch
-from ..core.settings import PROJECT_ROOT, Settings, load_settings
+from ..core.settings import INSTANCE_ENV, PROJECT_ROOT, Settings, load_settings
 from ..core.timeframes import Timeframe
 from ..core.timeutil import iso, now_ms, parse_date_spec
+from ..scalp import files as scalp_files
+from ..scalp.account import executor_row
+from ..scalp.safety import SAFETY_TEXT, manual_risk_cap
 from ..supervisor.procs import in_project
 from ..storage.reader import InstrumentReader
 from ..storage.tablespec import spec_for
@@ -65,6 +72,9 @@ MAX_PLAYBOOK_BYTES = 64 * 1024
 MAX_JSONL_BYTES = 2 * 1024 * 1024      # changes.jsonl / proposals.jsonl: only the tail beyond this
 MAX_JSON_NODES = 200_000               # _plain(): YAML aliases can describe exponentially large documents
 MODEL_ACTIONS_SCAN = 50                # valid decisions searched for the model's last position_actions
+SCALP_ID_RE = re.compile(r"\d{8}T\d{4}Z")  # D-058: a brief id (scalp/files.ID_RE) — never a path from the request
+MAX_SCALP_BYTES = 256 * 1024          # a record / md / status file of the scalp job
+MAX_SCALP_IDS = 5000                  # ids listed when one is looked up
 SESSION_KEYS = ("review_id", "kind", "status", "started", "ended", "elapsed_s", "model", "effort", "summary",
                 "summary_level", "error", "error_kind", "diff_guard", "cli", "reason")
 
@@ -521,6 +531,134 @@ def create_app(s: Settings) -> FastAPI:
         return JSONResponse({"on": True, "created": created, "scope": scope, "global": pair is None,
                              "file": str(path), "set_by": read_reason(path), "note": note})
 
+    # ------------------------------------------------------------------ Scalp tab (D-058)
+    scalp_dir = scalp_files.scalp_dir(s)       # data/scalp: the scalp job's own folder, never the desk's state
+
+    def scalp_json(name: str) -> Any:
+        """One of the job's JSON files (status / latest / stats / manual_trades) or None (missing, torn, too big)."""
+        text, truncated = _read_capped(scalp_dir / name, MAX_SCALP_BYTES)
+        if text is None or truncated:
+            return None
+        try:
+            return json.loads(text)
+        except ValueError:
+            return None
+
+    def scalp_charts() -> list[dict]:
+        out = []
+        for tf in s.scalp.charts:
+            try:
+                out.append({"tf": tf, "updated_ms": int((scalp_dir / "charts" / f"{tf}.png").stat().st_mtime * 1000)})
+            except OSError:
+                continue
+        return out
+
+    def scalp_row(rec: dict) -> dict:
+        """The history row: what the list shows without opening the record."""
+        brief = rec.get("brief") if isinstance(rec.get("brief"), dict) else {}
+        score = rec.get("score") if isinstance(rec.get("score"), dict) else None
+        checks = rec.get("checks") if isinstance(rec.get("checks"), dict) else {}
+        return {"id": rec.get("id"), "as_of_ms": rec.get("as_of_ms"), "reason": rec.get("reason"),
+                "model": rec.get("model"), "regime": brief.get("regime"), "bias": brief.get("bias"),
+                "bias_confidence": brief.get("bias_confidence"), "no_scalp_now": brief.get("no_scalp_now"),
+                "n_levels": len(brief.get("levels") or []), "n_plans": len(brief.get("plans") or []),
+                "n_rejected": sum(1 for c in checks.values() if isinstance(c, dict) and c.get("rejected")),
+                "score": score.get("summary") if score else None, "scored_ms": rec.get("scored_ms"),
+                "n_manual": len(rec.get("manual") or []), "latency_ms": rec.get("latency_ms")}
+
+    def scalp_equity(latest: dict | None) -> float | None:
+        """The account's equity for the risk cap: the executor's status row, else the latest brief's desk block."""
+        if app_db.exists():
+            try:
+                with _ro(app_db) as con:
+                    d, _, _ = executor_row(con)
+            except sqlite3.Error:
+                d = {}
+            if d.get("equity"):
+                return d["equity"]
+        desk = (latest or {}).get("desk") if isinstance(latest, dict) else None
+        return desk.get("equity") if isinstance(desk, dict) else None
+
+    @app.get("/api/scalp/charts/{tf}")
+    def scalp_chart(tf: str) -> FileResponse:
+        if tf not in s.scalp.charts:                      # never a path from the request
+            raise HTTPException(404, "unknown chart")
+        f = scalp_dir / "charts" / f"{tf}.png"
+        if not f.is_file():
+            raise HTTPException(404, "no chart yet")
+        return FileResponse(f, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/scalp/run")
+    def scalp_run(request: Request, x_dashboard_token: str | None = Header(default=None)) -> JSONResponse:
+        """Start one detached brief run now (``tools/scalp_brief.py --once --reason dashboard``). The run decides
+        ``scalp.enabled`` and every gate itself (the desk's call, the cap, the RAM): a rollback needs no API
+        restart. 409 while a run holds ``run.lock``."""
+        guard(request, x_dashboard_token)
+        probe = FileLock(scalp_dir / "run.lock")
+        if not probe.acquire(0):
+            raise HTTPException(409, "a scalp run is in progress")
+        probe.release()
+        try:
+            pid = _spawn_scalp_run(s)
+        except OSError as exc:
+            log.error("scalp run could not be started: %s", exc)
+            raise HTTPException(500, f"the scalp run could not be started: {exc}") from None
+        log.info("scalp run requested from the dashboard (pid %s)", pid)
+        _notify(s, "info", "Scalp run requested", "from the dashboard", key="scalp:run_requested")
+        note = ("the run checks scalp.enabled, the market, the daily cap, the desk's call and the free RAM first "
+                "(status.json says what it did); the brief arrives on this tab within ~2 minutes")
+        return JSONResponse({"started": True, "pid": pid, "note": note})
+
+    @app.get("/api/scalp/{brief_id}")
+    def scalp_record(brief_id: str) -> dict:
+        """One stored brief: the record and its markdown. Only an id that matches the pattern and is in the
+        listing (a request string is never joined into a path)."""
+        if not SCALP_ID_RE.fullmatch(brief_id) or brief_id not in scalp_files.list_ids(s, MAX_SCALP_IDS):
+            raise HTTPException(404, "unknown brief")
+        text, truncated = _read_capped(scalp_files.path_of(s, brief_id, "json"), MAX_SCALP_BYTES)
+        try:
+            rec = json.loads(text) if text is not None and not truncated else None
+        except ValueError:
+            rec = None
+        if not isinstance(rec, dict):
+            raise HTTPException(404, "brief not readable")
+        md, _ = _read_capped(scalp_files.path_of(s, brief_id, "md"), MAX_SCALP_BYTES)
+        return _plain({"id": brief_id, "record": rec, "md": md})
+
+    @app.get("/api/scalp")
+    def scalp(limit: int = 30) -> dict:
+        """The Scalp tab in one read: the job's config and status, the latest brief, the compact history, the
+        hit-rate (``stats.json``, else computed over the stored records), the owner's manual trades, the chart
+        images and the same-account safety text with the recommended manual risk cap."""
+        latest = scalp_json("latest.json")
+        latest = latest if isinstance(latest, dict) else None
+        history = []
+        for bid in scalp_files.list_ids(s, _limit(limit, 500)):
+            rec = scalp_files.read_record(s, bid)
+            if rec is not None:
+                history.append(scalp_row(rec))
+        stats = scalp_json("stats.json")
+        if not isinstance(stats, dict):
+            stats = None
+            try:
+                from ..scalp.journal import stats as compute_stats
+                stats = compute_stats(scalp_files.recent_records(s, s.scalp.stats_n), s.scalp.stats_n)
+            except ImportError:
+                log.warning("scalp.journal unavailable: no stats")
+        status = scalp_json("status.json")
+        manual = scalp_json("manual_trades.json")
+        rm = s.ai.models.scalp
+        return _plain({"enabled": s.scalp.enabled,
+                       "config": {"pair": s.scalp.pair, "hours_utc": list(s.scalp.hours_utc),
+                                  "max_per_day": s.scalp.max_per_day, "model": rm.model, "effort": rm.effort,
+                                  "charts": list(s.scalp.charts), "stats_n": s.scalp.stats_n,
+                                  "trigger_window_min": s.scalp.trigger_window_min},
+                       "status": status if isinstance(status, dict) else None, "latest": latest, "history": history,
+                       "stats": stats, "manual_trades": manual if isinstance(manual, list) else [],
+                       "charts": scalp_charts(), "safety": SAFETY_TEXT,
+                       "risk_cap": manual_risk_cap(scalp_equity(latest), s.scalp.manual_risk_cap_pct),
+                       "server_time": now_ms()})
+
     # ------------------------------------------------------------------ execute (manual mode)
     @app.post("/api/decisions/{decision_id}/execute")
     def execute(decision_id: str, request: Request, x_dashboard_token: str | None = Header(default=None)) -> JSONResponse:
@@ -586,6 +724,22 @@ def create_app(s: Settings) -> FastAPI:
     return app
 
 
+def _scalp_run_cmd(s: Settings) -> list[str]:
+    """The on-demand run: windowless python, ``--once`` (one brief, then the process ends and frees its RAM),
+    ``--reason dashboard`` (its own notification key; the hourly cadence untouched)."""
+    py = PROJECT_ROOT / ".venv" / "Scripts" / "pythonw.exe"
+    return [str(py), str(PROJECT_ROOT / "tools" / "scalp_brief.py"), "--once", "--quiet", "--reason", "dashboard"]
+
+
+def _spawn_scalp_run(s: Settings) -> int:
+    """Start the run detached (outside the API's job and console, like the MT5 terminal); module-level so the
+    tests replace it. Returns the pid. ``TS_MT5_NO_LAUNCH``: the run's deal fetch attaches to a running terminal
+    only, it never starts one."""
+    from ..supervisor.winops import spawn_outside
+    env = {**os.environ, INSTANCE_ENV: s.paths.instance or "", "TS_MT5_NO_LAUNCH": "1"}
+    return spawn_outside(_scalp_run_cmd(s), cwd=PROJECT_ROOT, console=False, env=env).pid
+
+
 _PROC_CACHE: dict[str, Any] = {"ts": 0, "rows": []}
 _PROC_TTL_MS = 30_000
 _SNAP_CACHE: dict[str, Any] = {"ts": 0, "key": None, "snap": None}
@@ -606,8 +760,8 @@ def _process_list() -> list[dict]:
             continue
         try:
             cmd = " ".join(p.cmdline() or [])
-            if ("tradingsystem" in cmd or "recorder.py" in cmd or ("multiprocessing" in cmd and "Python312" in cmd)) \
-                    and in_project(p):
+            if ("tradingsystem" in cmd or "recorder.py" in cmd or "scalp_brief.py" in cmd
+                    or ("multiprocessing" in cmd and "Python312" in cmd)) and in_project(p):
                 rows.append({"pid": p.info["pid"], "rss_mb": round(p.memory_info().rss / 2**20), "cmd": cmd[-80:]})
         except (psutil.Error, TypeError):
             continue

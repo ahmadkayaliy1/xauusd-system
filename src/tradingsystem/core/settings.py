@@ -529,6 +529,9 @@ class AIModelsCfg(_Model):
     escalation: RoleModelCfg = RoleModelCfg(model="opus", effort="high")
     review: RoleModelCfg = RoleModelCfg(model="opus", effort="high")        # Phase 4 review sessions
     monitor: RoleModelCfg = RoleModelCfg(model="sonnet", effort="low")      # Phase 4 diagnosis
+    # D-058 (owner, 2026-10-12): the manual-scalping brief (tools/scalp_brief.py) - Fable 5.1 by the owner's choice; the
+    # desk's own decisions stay on the provider's pinned model. The full model id, not the alias (the CLI resolves it)
+    scalp: RoleModelCfg = RoleModelCfg(model="claude-fable-5-1", effort="medium")
 
 
 class AIEscalationCfg(_Model):
@@ -801,6 +804,42 @@ class InstanceCfg(_Model):
     overrides: dict[str, Any] = Field(default_factory=dict)
 
 
+class ScalpCfg(_Model):
+    """D-058 (owner, 2026-10-12): the hourly manual-scalping brief (``tools/scalp_brief.py``, package ``scalp``) - a job
+    SEPARATE from the trading desk: it builds the desk's payload + charts, asks ``ai.models.scalp`` for the coming
+    hour's picture, levels and conditional plans, scores every brief afterwards on the real ticks, and shows it on
+    the dashboard's Scalp tab (+ toast / Telegram). It never places an order. Its ledger rows carry role ``scalp``
+    and no pair, so they count against neither the provider's ``rpd`` nor ``ai.daily_calls_per_pair``."""
+    enabled: bool = False
+    pair: str = "XAUUSD"
+    hours_utc: list[int] = Field(default_factory=lambda: [7, 16])    # hourly runs at [start, end) UTC (London + NY)
+    run_offset_s: int = Field(20, ge=0, le=600)         # seconds after the full hour (the 5m bar must be stored)
+    max_per_day: int = Field(12, ge=1, le=40)           # hourly + on-demand runs per UTC day
+    charts: list[str] = Field(default_factory=lambda: ["1h", "15m", "5m"])
+    min_free_ram_mb: int = Field(700, ge=0)
+    output_language: str = "ar"                         # the prose of the brief; technical terms stay English
+    journal_n: int = Field(6, ge=0, le=20)              # scored briefs shown to the model
+    stats_n: int = Field(20, ge=5, le=100)              # briefs behind the code-computed hit-rate
+    trigger_window_min: int = Field(60, ge=5, le=240)   # a plan may trigger this long after the brief
+    level_horizon_min: int = Field(60, ge=5, le=240)    # a level is scored over this window
+    hold_window_min: int = Field(30, ge=5, le=240)      # held / broken decided within this long after the touch
+    gate_retry_min: int = Field(20, ge=0, le=59)        # a run waits this long for the desk's call / RAM, then skips
+    run_timeout_s: int = Field(600, ge=60, le=1800)
+    manual_lookback_days: int = Field(7, ge=0, le=60)   # the owner's manual deals read from MT5 (0 = never attach)
+    notify: bool = True
+    notify_level: Literal["info", "warn"] = "info"
+    manual_risk_cap_pct: float = Field(5.0, gt=0, le=15)   # the recommendation shown on the page (never enforced)
+
+    @model_validator(mode="after")
+    def _check(self) -> "ScalpCfg":
+        h = self.hours_utc
+        if len(h) != 2 or not 0 <= h[0] < h[1] <= 24:
+            raise ValueError("scalp.hours_utc must be [start, end) with 0 <= start < end <= 24")
+        for tf in self.charts:
+            Timeframe.parse(tf)
+        return self
+
+
 class Settings(_Model):
     profile: Literal["low", "standard"] = "standard"
     timeframes: list[Timeframe]
@@ -823,6 +862,7 @@ class Settings(_Model):
     operator: OperatorCfg = OperatorCfg()
     backup: BackupCfg = BackupCfg()
     evaluation: EvaluationCfg = EvaluationCfg()
+    scalp: ScalpCfg = ScalpCfg()
 
     # populated by the loader, not by YAML
     config_hash: str = ""

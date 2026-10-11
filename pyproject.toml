@@ -36,7 +36,7 @@ tradingsystem = "tradingsystem.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-tradingsystem = ["ai/prompts/**/*.md"]
+tradingsystem = ["ai/prompts/**/*.md", "scalp/prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -18,6 +18,7 @@
       <button data-tab="performance">Performance</button>
       <button data-tab="health">Health</button>
       <button data-tab="journal">Journal</button>
+      <button data-tab="scalp">Scalp</button>
       <button data-tab="operator">Operator</button>
       <button data-tab="tuning">Tuning</button>
       <button data-tab="proposals">Proposals</button>
@@ -96,6 +97,17 @@
         <span class="small muted">The desk's trade journal and the model's own review of each trade (what the model reads, D-055).</span>
       </div>
       <div id="jr-body"><p class="muted small">Loading…</p></div>
+    </section>
+
+    <section id="tab-scalp" class="tab">
+      <div class="toolbar">
+        <button id="sc-refresh" class="primary">Refresh</button>
+        <button id="sc-run" class="primary" title="Ask the model for a brief now (one call on the scalp budget; the run applies its own gates: enabled, market, daily cap, the desk's call, free RAM)">Run now…</button>
+        <span id="sc-status" class="small muted">—</span>
+        <span class="small muted">The hourly manual-scalping brief (D-058): the model's picture, levels and conditional plans for the coming hour, scored by the code on the real ticks. It never places an order; the desk does not see manual trades.</span>
+      </div>
+      <div id="sc-body"><p class="muted small">Loading…</p></div>
+      <div id="sc-detail" class="detail hidden"></div>
     </section>
 
     <section id="tab-operator" class="tab">

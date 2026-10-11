@@ -1,0 +1,35 @@
+{
+ "regime": "range",
+ "bias": "neutral",
+ "bias_confidence": 55,
+ "picture": "الدهب عم يتذبذب جوّا مدى آسيا (4172.5 - 4186.0) بعد ما لندن جرّبت تكسر القمة ورجعت جوّا. الـ 1h structure لسا صاعدة بس الـ 15m عم يبني range، والـ ATR14 على الـ 5m حوالي 3.9 USD: حركة كافية لسكالب من طرفي المدى، مش من النص.",
+ "expect": "المتوقع نظرة تانية على 4186.0 (Asia high) قبل الأخبار؛ رفض هونيك بيرجّع السعر لـ 4180 (round). كسر وإغلاق 5m فوق 4187 بيلغي فكرة البيع وبيفتح الطريق لـ PDH 4195.",
+ "levels": [
+  {"price": 4186.0, "kind": "asia_high", "timeframe": "15m", "strength": "strong",
+   "why": "قمة مدى آسيا، لندن لمستها ورجعت جوّا (london_swept back_inside)؛ liquidity فوقها."},
+  {"price": 4172.5, "kind": "asia_low", "timeframe": "15m", "strength": "medium",
+   "why": "قاع مدى آسيا، ما انلمس من 03:00 UTC؛ تحتو stop liquidity."},
+  {"price": 4180.0, "kind": "round", "timeframe": "5m", "strength": "weak",
+   "why": "رقم دائري بنص المدى (levels.round) والـ VWAP جنبو؛ هدف لا دخول."},
+  {"price": 4195.0, "kind": "pdh", "timeframe": "1h", "strength": "strong",
+   "why": "قمة الأمس (PDH)؛ الهدف البعيد إذا انكسر مدى آسيا لفوق."}
+ ],
+ "plans": [
+  {"level_price": 4186.0, "side": "SELL",
+   "trigger": "لمسة تانية لـ 4186.0 مع wick رفض على شمعة 5m مسكّرة تحت 4186.",
+   "entry_type": "limit", "entry": 4186.0, "stop": 4189.0, "target": 4180.0, "rr": 2.0, "max_hold_min": 45,
+   "invalidation": "إغلاق 5m فوق 4187.0 قبل الدخول.", "confidence": 55},
+  {"level_price": 4172.5, "side": "BUY",
+   "trigger": "sweep تحت 4172.5 ورجوع فوقها بإغلاق 5m (رفض مسكّر).",
+   "entry_type": "market_after_rejection", "entry": 4173.0, "stop": 4170.0, "target": 4178.5, "rr": 1.83,
+   "max_hold_min": 60, "invalidation": "إغلاق 15m تحت 4172.0.", "confidence": 48}
+ ],
+ "no_scalp_now": false,
+ "no_scalp": [
+  "ما تدخل بآخر 30 دقيقة قبل CPI (12:30 UTC) ولا بأول 30 بعدها.",
+  "إذا السبريد فوق 0.6 USD أو الـ ATR 5m تحت 2 USD: ما في سكالب."
+ ],
+ "news_clock": ["12:30 UTC — CPI (high): blackout 12:00-13:00، كل الخطط لازم تكون مسكّرة قبل 12:00."],
+ "desk_warning": "النظام الآلي flat هلق على XAUUSD؛ إذا فتح صفقة بنص الساعة ما تعاكسها، وتذكّر إنو ما بيشوف صفقتك اليدوية.",
+ "confidence_note": "ما في سجل مقيَّم بعد: الثقة من القواعد (range + sweep) ومخفّضة 10 نقاط لحد ما تطلع نسبة الإصابة الحقيقية."
+}
