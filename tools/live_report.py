@@ -2,6 +2,10 @@
 
     python tools/live_report.py                      # yesterday (UTC), written to data/reviews/<stamp>_live.md
     python tools/live_report.py --day 2026-10-12 --print
+    python tools/live_report.py --telegram           # ... and its summary as a notification (Telegram + toast)
+
+D-059: the monitor (tools/monitor.py, Task Scheduler every 15 min) runs ``--telegram`` for yesterday on its first run
+after ``monitor.daily_report_utc`` (00:30 UTC): the owner gets the summary every morning without the desktop app.
 
 The day's trades (entry, stop, target, how each ended, R and USD, every stop change, the model's own review), the
 ideas the gate refused and why, the calls, the outages (sleeps, disconnects, restarts), the equity now and the running
@@ -44,7 +48,8 @@ def _ro(db: Path) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{db.as_posix()}?mode=ro", uri=True, timeout=10)
 
 
-def report(db: Path, day: dt.date) -> str:
+def collect(db: Path, day: dt.date) -> dict:
+    """The day's facts from app.db (read only): trades, calls, refusals, outages, the account, the running total."""
     t0, t1 = _ms(day), _ms(day) + DAY_MS
     con = _ro(db)
     try:
@@ -73,6 +78,66 @@ def report(db: Path, day: dt.date) -> str:
     closed = [t for t in trades if t.get("status") == "closed"]
     pnl = round(sum(t.get("pnl_usd") or 0.0 for t in closed), 2)
     wins = sum((t.get("pnl_usd") or 0) > 0 for t in closed)
+    return {"day": day, "trades": trades, "closed": closed, "pnl": pnl, "wins": wins, "since": since, "ex": ex,
+            "refused": refused, "calls": calls, "events": events, "sleeps": sleeps}
+
+
+def report(db: Path, day: dt.date) -> str:
+    return render(collect(db, day))
+
+
+def _trade_line(t: dict) -> str:
+    """One line per trade for the summary: time, side, entry, how it ended (R and USD when closed)."""
+    side = SIDE_AR.get(t.get("side"), t.get("side"))
+    if t.get("status") == "closed":
+        res = f"{EXIT_AR.get(t.get('exit'), t.get('exit'))} {_hm(t.get('closed'))}"
+        bits = [x for x in (f"{t['r']}R" if t.get("r") not in (None, "") else "",
+                            f"{t['pnl_usd']:+.2f} $" if t.get("pnl_usd") is not None else "") if x]
+        tail = f" ({'، '.join(bits)})" if bits else ""
+    else:
+        res = {"open": "لسا مفتوحة", "pending": "أمر معلّق"}.get(t.get("status"), str(t.get("status")))
+        tail = ""
+    return f"{_hm(t['placed'])} {side} {t.get('entry')} ← {res}{tail}"
+
+
+def brief(facts: dict, path: Path | None = None, max_trades: int = 8) -> str:
+    """The summary sent as a notification (Telegram shows it whole, the toast its first lines): the numbers of the
+    الخلاصة section, one line per trade, the refusals, the calls, the outages, and where the full file is."""
+    day, trades, closed, since, ex = (facts[k] for k in ("day", "trades", "closed", "since", "ex"))
+    calls, sleeps, events = facts["calls"], facts["sleeps"], facts["events"]
+    wins = facts["wins"]
+    lines = [f"تقرير الدهب اليومي - {day.isoformat()}",
+             f"الصفقات: {len(trades)} (تسكّرت {len(closed)}، ربحت {wins}، خسرت {len(closed) - wins}) - "
+             f"النتيجة: {facts['pnl']:+.2f} $",
+             f"الرصيد: {ex.get('equity', '—')} $ (مفتوح {ex.get('open_positions', '—')}، معلّق {ex.get('open_orders', '—')})",
+             f"من بداية H (9/10): {since[0] or 0} صفقة مسكّرة، ربحت {since[1] or 0}، المجموع {(since[2] or 0):+.2f} $"]
+    lines += [f"- {_trade_line(t)}" for t in trades[:max_trades]]
+    if len(trades) > max_trades:
+        lines.append(f"- و{len(trades) - max_trades} صفقات كمان بالملف")
+    errs = sum(r[0] in ("error", "interrupted") for r in calls)
+    lines += [f"رفض نظام المخاطر: {len(facts['refused'])} فكرة",
+              f"الأسئلة: {len(calls)} (أخطاء {errs}) - نوم الجهاز: {len(sleeps)} - انقطاعات: {events.get('disconnect', 0)}"]
+    if path is not None:
+        lines.append(f"الملف: {path}")
+    return "\n".join(lines)
+
+
+def send(s, facts: dict, path: Path | None) -> str:
+    """The summary through core.notify (log line, toast, Telegram - with the retries and the owed re-send of D-059);
+    returns what happened to it, for the console and the monitor's log."""
+    from tradingsystem.core import notify as nt
+    day = facts["day"].isoformat()
+    nt.notify(s, "info", f"XAUUSD daily report {day}", brief(facts, path), key=f"live_report:{day}", pair=PAIR)
+    nt.flush(30.0)
+    r = nt.last_result() or {}
+    return f"notification: toast {r.get('toast')}, telegram {r.get('telegram')}" + (f" ({r['why']})" if r.get("why") else "")
+
+
+def render(facts: dict) -> str:
+    """The Markdown report (the file in data/reviews, listed by the dashboard's Reviews tab)."""
+    day, trades, closed, pnl, wins = (facts[k] for k in ("day", "trades", "closed", "pnl", "wins"))
+    since, ex, refused, calls, events, sleeps = (facts[k] for k in ("since", "ex", "refused", "calls", "events",
+                                                                    "sleeps"))
     out = [f"# تقرير الحي اليومي - الدهب XAUUSD - {day.isoformat()}", "",
            "## الخلاصة",
            f"- الصفقات اللي انفتحت اليوم: **{len(trades)}** (تسكّرت {len(closed)}، ربحت {wins}، خسرت {len(closed) - wins}).",
@@ -137,6 +202,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--day", help="UTC day YYYY-MM-DD (default: yesterday)")
     ap.add_argument("--print", action="store_true", help="print only, write no file")
     ap.add_argument("--db", help="another app.db (read only; e.g. a backtest run's)")
+    ap.add_argument("--telegram", action="store_true",
+                    help="also send the summary as a notification (Telegram + Windows toast; D-059)")
     a = ap.parse_args(argv)
     day = dt.date.fromisoformat(a.day) if a.day else (dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=1)).date()
     s = load_settings(extra_env={"TS_INSTANCE": PAIR})
@@ -144,15 +211,19 @@ def main(argv: list[str] | None = None) -> int:
     if not db.exists():
         print(f"live_report: no database at {db}", file=sys.stderr)
         return 1
-    text = report(db, day)
+    facts = collect(db, day)
+    text = render(facts)
+    f: Path | None = None
     if a.print:
         print(text)
-        return 0
-    out = s.paths.data() / "reviews"
-    out.mkdir(parents=True, exist_ok=True)
-    f = out / f"{day.strftime('%Y%m%d')}T235959Z_live.md"
-    f.write_text(text + "\n", encoding="utf-8", newline="\n")
-    print(f)
+    else:
+        out = s.paths.data() / "reviews"
+        out.mkdir(parents=True, exist_ok=True)
+        f = out / f"{day.strftime('%Y%m%d')}T235959Z_live.md"
+        f.write_text(text + "\n", encoding="utf-8", newline="\n")
+        print(f)
+    if a.telegram:
+        print(send(s, facts, f))
     return 0
 
 

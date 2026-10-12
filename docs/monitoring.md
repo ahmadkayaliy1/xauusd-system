@@ -75,6 +75,7 @@ Thresholds are in the `monitor:` block of `config/config.yaml` (defaults shown).
 | Outage | a `disconnect` without a later `resumed` (MT5) / `connect` (Binance) for > `outage_warn_min` (10) | warn | — |
 | VPN | an adapter in `vpn_adapter_names` went up or down since the last run (a missing adapter is down) | info | — |
 | Daily review overdue | no finished daily session (`data\reviews\*_daily.session.json` with status `ok` or `max_turns`) newer than `review_overdue_hours` (30) — a pack alone (`*_daily.md` from a `--dry-run`, a failed start or `review_pack.py` by hand) does not count; before the first one, counted from the monitor's first run; skipped with `operator.enabled: false` | warn | — |
+| Daily live report (D-059) | not a finding: the first run after `daily_report_utc` (00:30 UTC; `""` = off) runs `tools\live_report.py --day <yesterday> --telegram` (the Arabic report file in `data\reviews` + its summary on Telegram and as a toast, docs/notifications.md §2), every day but Saturday; the state remembers the day done (`daily_report`); a failed run is tried again by the next runs, three times, then a warning `daily_report:<day>` | warn (after three failures) | — |
 | Slow snapshot build | the engine's `snapshot_build_ms` (the median of its recent builds, else the last) above `snapshot_build_warn_ms` (3000) on **two runs in a row** | warn | — |
 | A broken check | an exception inside one check (the others still run) | warn | — |
 

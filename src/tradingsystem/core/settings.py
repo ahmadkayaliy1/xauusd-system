@@ -728,6 +728,14 @@ class MonitorCfg(_Model):
     recorder_stall_min: int = Field(30, ge=0)           # the P1.12 recorder's last flush older → warn; 0 = not watched
     diagnose_max_per_day: int = Field(2, ge=0)          # billed diagnosis sessions per UTC day (shared Max plan)
     diagnose_max_gauge_level: int = Field(0, ge=0, le=2)    # no diagnosis while the usage gauge is above this level
+    daily_report_utc: str = "00:30"                     # D-059: yesterday's live report (+ its Telegram summary) from the
+    #                                                     monitor's first run after this UTC time; "" = off
+
+    @model_validator(mode="after")
+    def _times(self) -> "MonitorCfg":
+        if self.daily_report_utc:
+            _check_hhmm(self.daily_report_utc, "monitor.daily_report_utc")
+        return self
 
     @model_validator(mode="after")
     def _drops(self) -> "MonitorCfg":

@@ -91,6 +91,9 @@ CONFIG_ERROR_LOG = ROOT / "logs" / "monitor-config-error.log"     # fixed: witho
 CONFIG_ERROR_LOG_MAX = 1_000_000            # bytes; then it is rotated once (.1)
 CONFIG_TOAST_TIMEOUT_S = 15.0
 DIAGNOSE_KEEP_MS = 2 * MS_PER_DAY           # diagnosis starts remembered this long (the per-UTC-day budget)
+DAILY_REPORT = ROOT / "tools" / "live_report.py"    # D-059: yesterday's live report + its Telegram summary
+DAILY_REPORT_TIMEOUT_S = 240.0
+DAILY_REPORT_TRIES = 3                      # attempts per day (one per run) before the warning
 
 
 def _load_health_report():
@@ -175,6 +178,15 @@ def _spawn(cmd: list[str], cwd: Path):
     return winops.spawn_outside(cmd, cwd=cwd, console=True)
 
 
+def _run_tool(cmd: list[str], cwd: Path, timeout_s: float) -> tuple[int, str]:
+    """A short foreground helper of this run (the daily report): no window, output captured. Returns the exit code
+    and the tail of what it printed."""
+    r = subprocess.run(cmd, cwd=str(cwd), capture_output=True, timeout=timeout_s,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    out = (r.stdout or b"") + (r.stderr or b"")
+    return r.returncode, out.decode("utf-8", "replace").strip()[-400:]
+
+
 def _notify(s: Settings, level: str, title: str, text: str, *, key: str, pair: str | None) -> dict | None:
     """core.notify (log line + toast + Telegram); a missing or failing notifier never stops the monitor. Returns the
     process notifier's result record (its worker fills in the sinks; :func:`_undelivered` reads it), None when there
@@ -207,6 +219,7 @@ def _flush_notify(timeout_s: float = 15.0) -> None:
 
 _SINK_OK = ("shown", "sent")
 _SINK_LOST = ("pending", "failed", "queue full", "not queued")     # prefixes: in flight, or no delivery
+_SINK_LATER = ("owed",)         # D-059: kept by core.notify for a re-send by any process - not this monitor's job
 
 
 def _undelivered(res: dict | None) -> bool:
@@ -217,7 +230,7 @@ def _undelivered(res: dict | None) -> bool:
     if not isinstance(res, dict):
         return False
     sinks = [v for v in (res.get("toast"), res.get("telegram")) if isinstance(v, str)]
-    if any(v in _SINK_OK for v in sinks):
+    if any(v in _SINK_OK or v.startswith(_SINK_LATER) for v in sinks):
         return False
     return any(v.startswith(_SINK_LOST) for v in sinks)
 
@@ -428,7 +441,7 @@ class Monitor:
             self._system(s)
         for name, fn in (("equity", self._equity), ("drawdown", self._drawdown), ("resources", self._resources),
                          ("power", self._power), ("commit", self._commit_charge), ("recorder", self._recorder),
-                         ("vpn", self._vpn), ("reviews", self._reviews)):
+                         ("vpn", self._vpn), ("reviews", self._reviews), ("daily_report", self._daily_report)):
             self._guard(None, name, fn)
         self._dispatch()
         self._deliver()
@@ -959,6 +972,47 @@ class Monitor:
                               f"no finished daily review in {d} since the monitor started ({iso(ref)})")
                              + f" — more than {b.monitor.review_overdue_hours} h; check the "
                                "TradingSystemOps-ReviewDaily task (docs/operator_sessions.md)"))
+
+    def _daily_report(self) -> None:
+        """D-059: yesterday's live report (``tools/live_report.py --day <yesterday> --telegram``) once a day, from the
+        first run after ``monitor.daily_report_utc`` - no Claude session, no desktop app: the file in ``data/reviews``
+        and its summary on Telegram and as a toast. A Saturday (no market) is skipped; a failed run is tried again by
+        the next runs, ``DAILY_REPORT_TRIES`` times, then a warning. The state remembers the day it was done for."""
+        at = self.base.monitor.daily_report_utc
+        prev = self.prev.get("daily_report") if isinstance(self.prev.get("daily_report"), dict) else {}
+        self.state["daily_report"] = prev
+        if not at or not DAILY_REPORT.is_file():
+            return
+        hh, mm = (int(x) for x in at.split(":"))
+        now = dt.datetime.fromtimestamp(self.now / 1000, dt.timezone.utc)
+        if now < now.replace(hour=hh, minute=mm, second=0, microsecond=0):
+            return
+        day = (now - dt.timedelta(days=1)).date()
+        if day.weekday() == 5:                              # a Saturday (UTC): the market was closed all day
+            return
+        same = prev.get("day") == day.isoformat()
+        tries = int(prev.get("tries") or 0) if same else 0
+        if same and (prev.get("ok") or tries >= DAILY_REPORT_TRIES):
+            return
+        if self.dry_run:
+            return
+        rec = {"day": day.isoformat(), "ts": self.now, "tries": tries + 1, "ok": False}
+        self.state["daily_report"] = rec
+        try:
+            rc, out = _run_tool([sys.executable, str(DAILY_REPORT), "--day", day.isoformat(), "--telegram"], ROOT,
+                                DAILY_REPORT_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — a timeout, a missing interpreter
+            rc, out = -1, f"{type(exc).__name__}: {str(exc)[:200]}"
+        rec["ok"], rec["out"] = rc == 0, out[-300:]
+        if rc == 0:
+            log.info("daily live report for %s done: %s", day, out[-200:])
+            return
+        log.warning("daily live report for %s failed (attempt %d/%d, exit %s): %s", day, rec["tries"],
+                    DAILY_REPORT_TRIES, rc, out[-300:])
+        if rec["tries"] >= DAILY_REPORT_TRIES:
+            self.add(Finding("warn", f"daily_report:{day.isoformat()}", "Daily live report failed",
+                             f"tools/live_report.py --day {day.isoformat()} --telegram failed {rec['tries']} times "
+                             f"(exit {rc}): {out[-200:] or 'no output'} - run it by hand (docs/notifications.md §2)"))
 
     # ---- notification, dedupe, diagnosis
     def _dispatch(self) -> None:

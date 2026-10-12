@@ -371,6 +371,8 @@ monitor:                               # Phase 4: tools/monitor.py every 15 min 
   on_battery_warn_min: 5               # on battery longer than this → warn (the charger is out)
   commit_warn_pct: 85                  # committed memory above this share of the commit limit → warn
   recorder_stall_min: 30               # the P1.12 price recorder's last flush older than this → warn (0 = off)
+  daily_report_utc: "00:30"            # D-059: yesterday's live report (tools\live_report.py --telegram: the file +
+                                       # its summary on Telegram / toast) from the first monitor run after this (UTC); "" = off
 
 operator:                              # Phase 4: Claude review sessions from Task Scheduler (tools/operator, H19)
   daily_max_turns: 30

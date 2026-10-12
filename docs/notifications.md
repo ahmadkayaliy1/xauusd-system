@@ -88,6 +88,8 @@ is still a log line and an event on the dashboard.
 | Proposals (`tools\propose.py`) | a proposal is waiting for you | info |
 | Operator sessions | the daily, weekly or diagnosis summary; a failed session; `review_touched_checkout` | info or warn |
 | Scripts and sessions | anything sent with `tools\notify.py` (its `--key K` is deduplicated as `cli:K`, so it never matches a system's key) | as given |
+| Scalp tab (D-058, `tools\scalp_brief.py`) | every brief (key `scalp:<id>`: regime, bias, NO SCALP, the first 600 characters of the Arabic text); a failed brief (key `scalp:fail:<day>`); a run requested from the dashboard | info (`scalp.notify_level`), warn for a failure |
+| Daily live report (D-059, `tools\live_report.py --telegram`) | the Arabic summary of yesterday's live desk (trades with R and USD, equity, the running total since D-055, refusals, calls, sleeps), key `live_report:<day>`; sent by the monitor's first run after `monitor.daily_report_utc` (00:30 UTC, every day but Saturday), the full file in `data\reviews\<day>T235959Z_live.md` (Reviews tab); by hand: `.venv\Scripts\python.exe tools\live_report.py --day YYYY-MM-DD --telegram`; a report that failed three runs in a row is a warning `monitor:daily_report:<day>` | info |
 
 The toast title starts with `Warning:` or `CRITICAL:` for those levels, and a critical toast stays on screen longer.
 A Telegram message starts with `[INFO]`, `[WARN]` or `[CRITICAL]`. When the title does not already name the pair,
@@ -115,8 +117,17 @@ The rules are checked in this order:
 * **Rate limit** counts what a process actually sent in the last hour, separately for `info` and for `warn`: a busy
   hour of fills, closes and stop moves (`info`) never uses up what a warning needs. `critical` is never limited. A
   deduplicated notification does not count.
-* **No retries.** A message that fails is not sent again. The log line is always there. (The monitor is the exception:
-  a finding whose notification reached no channel is sent again by its next run, see docs/monitoring.md.)
+* **Retries and owed messages (D-059).** A Telegram send that fails on the network side (no internet, a DNS or VPN
+  burst, a timeout, a 5xx, a 429) is retried twice at once (after 2 s and 5 s, within a 12 s budget). Still failing,
+  the message is kept in `data\shared\notify_owed.json` (under `locks\notify_owed.lock`, shared by every system)
+  and re-sent, prefixed with the time it was meant for, by the first notifier of ANY process that can reach Telegram
+  again: right after its own next successful send, or on its idle check every 60 s (the engine, the executor and the
+  supervisor are long-lived, so an outage of hours still ends with every message delivered, in order, at most 5 per
+  check). An owed message older than 24 h is dropped. A refusal by Telegram (HTTP 400/401/403/404: a wrong token or
+  chat id, a blocked bot) is final: no retry, nothing kept. The toast is never retried (it is local). The result of
+  such a send reads `telegram: owed: ...`; the monitor's own re-send (docs/monitoring.md) leaves owed messages to this
+  mechanism and only re-sends what reached no channel at all. **What this cannot do:** send while the PC is asleep or
+  off - the message is sent when it wakes (a sleep is the usual reason "nothing arrived").
 * **Short-lived tools** (`tools\notify.py`, the monitor, tune, propose, the session runner) wait for the toast and
   Telegram before they exit, at most 15 s (the monitor longer when one run queued several, see docs/monitoring.md).
   The toast goes first, so it is shown even when Telegram is still waiting for a dead network.
@@ -182,7 +193,10 @@ Problems with a channel are also lines with `"logger": "notify"`: `Telegram send
 | `telegram: failed: HTTP 400 Bad Request: chat not found` | wrong chat id, or the bot was never started | §1 steps 2 and 3 |
 | `telegram: failed: HTTP 403 Forbidden: bot was blocked by the user` | you blocked the bot | unblock it in Telegram |
 | `telegram: failed: HTTP 429 ...` | Telegram's own flood limit | wait; lower `rate_per_hour` |
-| `telegram: failed: ConnectError ...` or `ConnectTimeout ...` | no internet, VPN or firewall | the log line and the toast still work |
+| `telegram: owed: ConnectError ...` (or `ConnectTimeout`, `HTTP 502`, ...) | no internet, VPN or firewall at that moment (after the two quick retries) | nothing to do: the message sits in `data\shared\notify_owed.json` and goes out, marked as delayed, as soon as any running system reaches Telegram again (§3); the log line and the toast still work |
+| `telegram: failed: ConnectError ...` | the same, but the owed file could not be written (disk, lock busy) | check `data\shared` and the log line `owed file ... unusable` |
+| Telegram messages arrive on the PC's log but not on the phone | the phone drops them: the bot's chat is muted, Telegram is battery-restricted, or Do Not Disturb / a Focus is on | in the bot's chat: its name > Notifications on (not muted), a sound; Telegram Settings > Notifications and Sounds > Private Chats on; Android: Settings > Apps > Telegram > Battery > Unrestricted and background data allowed; iPhone: Settings > Telegram > Notifications > Allow, Time Sensitive on; pin the chat |
+| Nothing at all for hours, no log lines either | the PC was asleep (battery, lid) or the systems were stopped | `scripts\status_all.bat`; keep the charger in (docs/monitoring.md: *Running on battery*); every message the systems produce while awake is logged, and the Telegram ones are retried / owed (§3) |
 | `toast: shown` but nothing appears | Windows hides it: Do not disturb, or notifications off for Windows PowerShell | Windows Settings > System > Notifications |
 | `toast: failed: ...` | PowerShell or WinRT failed (e.g. no desktop session) | run `tools\notify.py` from your own logged-on desktop |
 | `log only (TS_NOTIFY_DISABLE)` | the variable is set in this environment | `set TS_NOTIFY_DISABLE=` |

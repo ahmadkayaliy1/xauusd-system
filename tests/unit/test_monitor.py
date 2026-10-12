@@ -19,7 +19,7 @@ import pytest
 
 from tradingsystem.core.killswitch import read_reason
 from tradingsystem.core.settings import INSTANCE_ENV, load_settings
-from tradingsystem.core.timeutil import MS_PER_HOUR, MS_PER_MINUTE, iso
+from tradingsystem.core.timeutil import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, iso
 from tradingsystem.core.filelock import FileLock, locks_dir
 from tradingsystem.execution import drawdown
 from tradingsystem.execution.exposure import aggregate, leg
@@ -62,7 +62,9 @@ def mon(monkeypatch):
 
     monkeypatch.setattr(m, "_spawn", refuse)
     monkeypatch.delenv(m.NO_DIAGNOSE_ENV, raising=False)
-    m.clock, m.sent = clock, sent
+    reports: list[list[str]] = []                      # D-059: the daily report helper is recorded, never run
+    monkeypatch.setattr(m, "_run_tool", lambda cmd, cwd, timeout_s: (reports.append(list(cmd)), (0, "ok"))[1])
+    m.clock, m.sent, m.reports = clock, sent, reports
     return m
 
 
@@ -421,6 +423,59 @@ def test_undelivered_means_no_sink_got_it_through_and_config_log_only_counts_as_
     assert not lost(None) and not lost(result("rate limit 20/hour: log only", "rate limit 20/hour: log only"))
     dup = result("deduped (key sent within 30 min)", "deduped (key sent within 30 min)", deduped=True)
     assert not lost(dup)                                     # a re-send has a key of its own (:retry<n>)
+    # D-059: a message core.notify kept for its own re-send (any process) is not this monitor's to send again
+    assert not lost(result("off (notify.toast: false)", "owed: ConnectError: network down (kept in notify_owed.json)"))
+    assert lost(result("failed: exit 1", "failed: ConnectError"))
+
+
+# ------------------------------------------------------------------ D-059: the daily live report
+def test_the_daily_live_report_runs_once_a_day_after_its_time_and_skips_saturdays(mon, world):
+    seed(world["BTCUSDT"], status=fresh())
+    day0 = T0 - 12 * MS_PER_HOUR                        # T0 is a Wednesday 12:00 UTC: 00:00 of that day
+    run(mon, world, ["BTCUSDT"], at=day0 + 20 * MIN)    # 00:20: before daily_report_utc (00:30)
+    assert mon.reports == [] and "day" not in state(world).get("daily_report", {})
+    res = run(mon, world, ["BTCUSDT"], at=day0 + 32 * MIN)
+    (cmd,) = mon.reports
+    assert cmd[1:] == [str(mon.DAILY_REPORT), "--day", "2026-09-22", "--telegram"] and res.exit_code == 0
+    assert state(world)["daily_report"] == {"day": "2026-09-22", "ts": day0 + 32 * MIN, "tries": 1, "ok": True, "out": "ok"}
+    run(mon, world, ["BTCUSDT"], at=day0 + 6 * MS_PER_HOUR)            # the same day: not again
+    run(mon, world, ["BTCUSDT"], at=day0 + 23 * MS_PER_HOUR)
+    assert len(mon.reports) == 1
+    run(mon, world, ["BTCUSDT"], at=day0 + MS_PER_DAY + 31 * MIN)      # Thursday 00:31: Wednesday's report
+    assert len(mon.reports) == 2 and mon.reports[1][3] == "2026-09-23"
+    sunday = day0 + 4 * MS_PER_DAY + 31 * MIN                         # Sunday 00:31: Saturday had no market
+    run(mon, world, ["BTCUSDT"], at=sunday)
+    assert len(mon.reports) == 2
+    run(mon, world, ["BTCUSDT"], at=sunday + MS_PER_DAY)               # Monday: Sunday's two market hours
+    assert len(mon.reports) == 3 and mon.reports[2][3] == "2026-09-27"
+    run(mon, world, ["BTCUSDT"], at=sunday + 2 * MS_PER_DAY, dry_run=True)   # a dry run never runs it
+    assert len(mon.reports) == 3
+
+
+def test_a_failing_daily_report_is_tried_three_times_then_warned_about(mon, world, monkeypatch):
+    seed(world["BTCUSDT"], status=fresh())
+    monkeypatch.setattr(mon, "_run_tool", lambda cmd, cwd, timeout_s: (mon.reports.append(list(cmd)), (1, "boom"))[1])
+    day0 = T0 - 12 * MS_PER_HOUR
+    for i in range(1, 4):
+        res = run(mon, world, ["BTCUSDT"], at=day0 + (30 + 15 * i) * MIN)
+        assert len(mon.reports) == i and state(world)["daily_report"]["tries"] == i
+        assert [f.key for f in res.findings] == ([] if i < 3 else ["daily_report:2026-09-22"])
+    assert res.findings[0].level == "warn" and "boom" in res.findings[0].text
+    run(mon, world, ["BTCUSDT"], at=day0 + 2 * MS_PER_HOUR)
+    assert len(mon.reports) == 3                                      # given up for that day
+    monkeypatch.setattr(mon, "_run_tool", lambda cmd, cwd, timeout_s: (mon.reports.append(list(cmd)),
+                                                                        (_ for _ in ()).throw(RuntimeError("no interpreter")))[1])
+    run(mon, world, ["BTCUSDT"], at=day0 + MS_PER_DAY + 31 * MIN)      # the next day: a raised error is a failure too
+    assert state(world)["daily_report"]["ok"] is False and "RuntimeError" in state(world)["daily_report"]["out"]
+
+
+def test_the_daily_report_is_off_without_a_time_or_the_tool(mon, world, monkeypatch, tmp_path):
+    seed(world["BTCUSDT"], status=fresh())
+    base = world["base"].model_copy(update={"monitor": world["base"].monitor.model_copy(update={"daily_report_utc": ""})})
+    mon.run(base, [world["BTCUSDT"]], None, now=T0)
+    monkeypatch.setattr(mon, "DAILY_REPORT", tmp_path / "absent.py")
+    mon.run(world["base"], [world["BTCUSDT"]], None, now=T0)
+    assert mon.reports == []
 
 
 def outcomes(mon, monkeypatch, make=result) -> dict:

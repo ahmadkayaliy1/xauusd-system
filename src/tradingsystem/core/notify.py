@@ -29,8 +29,16 @@ one is never limited); the same ``key`` sent by ANY system within ``notify.dedup
 (``data/shared/notify_state.json`` under a file lock — the three pair systems share one account and one owner). A sink
 failure is one warning per hour and sink in the process log; nothing here ever raises into the caller.
 
+**A Telegram send that fails on the network side is retried** (D-059): two quick retries within
+``TELEGRAM_RETRY_BUDGET_S``, then the message is written to ``data/shared/notify_owed.json`` (under its file lock, shared
+by every system) and re-sent by the first notifier worker of ANY process that can reach Telegram again - right after
+its own next successful send, or on its idle check every ``OWED_POLL_S`` - prefixed with the time it was meant for.
+An entry older than ``OWED_MAX_AGE_MS`` is dropped; so is one Telegram refuses for good (a bad token or chat id, a
+blocked bot: HTTP 400/401/403/404 are never retried). The result record says ``owed: ...`` for a kept message, so
+the monitor's own re-send (docs/monitoring.md) leaves it to this mechanism. The toast is never retried (it is local).
+
 Short-lived tools (``tools/notify.py``, the monitor, the session runner) call :func:`flush` before exiting: the worker
-is a daemon thread and dies with the interpreter.
+is a daemon thread and dies with the interpreter (a message a tool owes is re-sent by a long-lived process).
 """
 from __future__ import annotations
 
@@ -45,6 +53,7 @@ import subprocess
 import threading
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -55,7 +64,7 @@ from dotenv import dotenv_values
 from .filelock import FileLock, locks_dir
 from .logsetup import get_redactor
 from .settings import PROJECT_ROOT, TELEGRAM_SECRET_ENV, Settings
-from .timeutil import MS_PER_MINUTE, now_ms
+from .timeutil import MS_PER_MINUTE, iso, now_ms
 
 log = logging.getLogger("notify")
 
@@ -77,6 +86,16 @@ RATE_WINDOW_S = 3600.0
 SINK_WARN_EVERY_S = 3600.0
 DOTENV_TTL_S = 60.0                     # the Telegram values: .env re-read at most this often (as secret())
 DOTENV_RECHECK_S = 2.0                  # a .env read that may be a file caught mid-save is re-read this soon
+TELEGRAM_RETRY_S = (2.0, 5.0)           # pauses before the quick retries of a Telegram send that failed (D-059)
+TELEGRAM_RETRY_BUDGET_S = 12.0          # no retry starts after this much time since the first attempt (a tool's flush)
+PERMANENT_HTTP = (400, 401, 403, 404)   # Telegram refuses the message for good: no retry, nothing owed
+OWED_FILE = "notify_owed.json"          # Telegram messages no process could send yet (data/shared, every system)
+OWED_LOCK = "notify_owed.lock"
+OWED_MAX_AGE_MS = 24 * 60 * MS_PER_MINUTE   # an owed message older than a day is dropped
+OWED_MAX = 200                          # entries kept (the oldest go first)
+OWED_BATCH = 5                          # re-sent per drain (then the next drain)
+OWED_POLL_S = 60.0                      # an idle worker looks for owed messages this often
+OWED_CLAIM_MS = 3 * MS_PER_MINUTE       # an entry one process is re-sending is left alone by the others this long
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BOT_URL_RE = re.compile(r"/bot[^/\s\"'<>]+")
@@ -238,6 +257,8 @@ class Notifier:
         self._env_unconfirmed: dict[str, str] | None = None   # a .env read not accepted yet (see _dotenv)
         self._env_named: set[str] = set()             # Telegram names .env has defined while this process ran
         self.results: collections.deque[dict[str, Any]] = collections.deque(maxlen=50)
+        self.sleep: Callable[[float], None] = time.sleep     # the retry pauses (tests replace it)
+        self._last_s: Settings | None = None                 # the idle drain needs a Settings (paths, timeout)
 
     # ---- caller's thread
     def submit(self, s: Settings, level: str, title: str, text: str, *, key: str | None = None,
@@ -267,6 +288,7 @@ class Notifier:
                 res["why"] = f"log only (below notify.min_level {cfg.min_level})"
                 return res
             res["ts"] = int(self.clock())
+            self._last_s = s
             res.update(done=False, toast="pending", telegram="pending")
             self._enqueue(_Item(s, lvl, ttl, txt, k, p, res["ts"], res))
         except Exception as exc:  # noqa: BLE001 — a notification never breaks the caller
@@ -342,7 +364,14 @@ class Notifier:
     # ---- worker thread
     def _loop(self) -> None:
         while True:
-            item = self._q.get()
+            try:
+                item = self._q.get(timeout=OWED_POLL_S)
+            except queue.Empty:                        # idle: a message another process (or this one) still owes?
+                try:
+                    self._idle_drain()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
             try:
                 self.process(item)
             except Exception:  # noqa: BLE001 — the worker must outlive any one notification
@@ -535,25 +564,163 @@ class Notifier:
         return text if len(text) <= TELEGRAM_MAX else text[:TELEGRAM_MAX - 1] + "…"
 
     def _telegram(self, item: _Item, token: str, chat: str) -> str:
-        _guard_httpx_logs()
-        try:
-            with httpx.Client(timeout=float(item.s.notify.timeout_s), transport=self.transport) as client:
-                resp = client.post(f"{TELEGRAM_API}/bot{token}/sendMessage",
-                                   json={"chat_id": chat, "text": self.telegram_text(item),
-                                         "disable_web_page_preview": True})
-            try:
-                body = resp.json()
-            except ValueError:
-                body = None
-            if resp.status_code == 200 and isinstance(body, dict) and body.get("ok") is True:
-                return "sent"
-            desc = body.get("description") if isinstance(body, dict) else None
-            why = f"HTTP {resp.status_code}" + (f" {desc}" if desc else "")
-        except Exception as exc:  # noqa: BLE001 — httpx texts carry the URL, i.e. the token
-            why = f"{type(exc).__name__}: {exc}"
-        why = _redact(why, token, chat)[:300]
+        ok, why, permanent = self._send_telegram(item.s, token, chat, self.telegram_text(item))
+        if ok:
+            self._drain_owed(item.s, token, chat)      # Telegram is reachable: settle what any process still owes
+            return "sent"
         self._note("telegram", f"Telegram sendMessage failed: {why}")
+        if not permanent and self._owe(item, why):
+            return f"owed: {why} (kept in {OWED_FILE} for a re-send)"
         return f"failed: {why}"
+
+    def _send_telegram(self, s: Settings, token: str, chat: str, text: str) -> tuple[bool, str, bool]:
+        """One ``sendMessage`` with the quick retries (``TELEGRAM_RETRY_S`` within ``TELEGRAM_RETRY_BUDGET_S``) on a
+        network-side failure. Returns ``(sent, why, permanent)``: ``permanent`` = Telegram refused the message
+        (``PERMANENT_HTTP``), so a retry can never help."""
+        _guard_httpx_logs()
+        why, permanent = "", False
+        started = self.monotonic()
+        for attempt, pause in enumerate((0.0,) + TELEGRAM_RETRY_S):
+            if attempt and (permanent or self.monotonic() - started + pause > TELEGRAM_RETRY_BUDGET_S):
+                break
+            if pause:
+                self.sleep(pause)
+            try:
+                with httpx.Client(timeout=float(s.notify.timeout_s), transport=self.transport) as client:
+                    resp = client.post(f"{TELEGRAM_API}/bot{token}/sendMessage",
+                                       json={"chat_id": chat, "text": text, "disable_web_page_preview": True})
+                try:
+                    body = resp.json()
+                except ValueError:
+                    body = None
+                if resp.status_code == 200 and isinstance(body, dict) and body.get("ok") is True:
+                    return True, "", False
+                desc = body.get("description") if isinstance(body, dict) else None
+                why = f"HTTP {resp.status_code}" + (f" {desc}" if desc else "")
+                permanent = resp.status_code in PERMANENT_HTTP
+            except Exception as exc:  # noqa: BLE001 — httpx texts carry the URL, i.e. the token
+                why, permanent = f"{type(exc).__name__}: {exc}", False
+            why = _redact(why, token, chat)[:300]
+        return False, why, permanent
+
+    # ---- owed Telegram messages (D-059): what no process could send is re-sent by the first one that can
+    @staticmethod
+    def _owed_path(s: Settings) -> Path:
+        return s.paths.shared() / OWED_FILE
+
+    @staticmethod
+    def _read_owed(path: Path) -> list[dict[str, Any]]:
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+        except (OSError, ValueError):
+            return []
+        items = doc.get("owed") if isinstance(doc, dict) else None
+        if not isinstance(items, list):
+            return []
+        return [e for e in items if isinstance(e, dict) and isinstance(e.get("text"), str)
+                and isinstance(e.get("ts"), int) and not isinstance(e.get("ts"), bool)]
+
+    @staticmethod
+    def _write_owed(path: Path, items: list[dict[str, Any]], now: int) -> None:
+        if not items:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps({"owed": items, "updated_ms": now}, ensure_ascii=False, indent=0),
+                       encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+
+    def _owe(self, item: _Item, why: str) -> bool:
+        """Keep the message for a later send (by any process). False when the file could not be written."""
+        s = item.s
+        path = self._owed_path(s)
+        try:
+            lock = FileLock(locks_dir(s) / OWED_LOCK)
+            with lock.hold(timeout=LOCK_WAIT_S) as got:
+                if not got:
+                    self._note("owed", f"{lock.path} busy for {LOCK_WAIT_S:.0f} s - the message is not kept")
+                    return False
+                now = int(self.clock())
+                items = [e for e in self._read_owed(path) if now - e["ts"] < OWED_MAX_AGE_MS]
+                items.append({"id": uuid.uuid4().hex[:12], "ts": int(item.ts), "level": item.level,
+                              "text": self.telegram_text(item), "why": why[:120], "claimed_until": 0})
+                if len(items) > OWED_MAX:
+                    items = items[-OWED_MAX:]
+                self._write_owed(path, items, now)
+            log.info("Telegram message kept for a later send: '%s' (%s)", item.title, why[:120],
+                     extra={"ctx": {"key": item.key, "owed": len(items)}})
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._note("owed", f"owed file {path} unusable ({type(exc).__name__}: {exc}) - the message is not kept")
+            return False
+
+    @staticmethod
+    def _delayed_text(e: dict[str, Any]) -> str:
+        head = f"[رسالة متأخّرة - وقتها {iso(int(e['ts']))[:16].replace('T', ' ')} UTC]"
+        text = f"{head}\n{e['text']}"
+        return text if len(text) <= TELEGRAM_MAX else text[:TELEGRAM_MAX - 1] + "…"
+
+    def _idle_drain(self) -> int:
+        s = self._last_s
+        if s is None or disabled() or not s.notify.enabled or not s.notify.telegram:
+            return 0
+        if not self._owed_path(s).exists():
+            return 0
+        token, chat = self._telegram_creds()
+        if not (token and chat):
+            return 0
+        return self._drain_owed(s, token, chat)
+
+    def _drain_owed(self, s: Settings, token: str, chat: str) -> int:
+        """Re-send up to ``OWED_BATCH`` owed messages (oldest first): claimed under the lock, sent without it, removed
+        under it again. Stops at the first network failure (the claims expire). Returns how many were settled."""
+        path = self._owed_path(s)
+        if not path.exists():
+            return 0
+        lock = FileLock(locks_dir(s) / OWED_LOCK)
+        now = int(self.clock())
+        try:
+            with lock.hold(timeout=LOCK_WAIT_S) as got:
+                if not got:
+                    return 0
+                items = [e for e in self._read_owed(path) if now - e["ts"] < OWED_MAX_AGE_MS]
+                mine = [e for e in items if int(e.get("claimed_until") or 0) <= now][:OWED_BATCH]
+                for e in mine:
+                    e["claimed_until"] = now + OWED_CLAIM_MS
+                self._write_owed(path, items, now)
+        except Exception as exc:  # noqa: BLE001
+            self._note("owed", f"owed file {path} unusable ({type(exc).__name__}: {exc})")
+            return 0
+        settled: list[str] = []
+        for e in mine:
+            ok, why, permanent = self._send_telegram(s, token, chat, self._delayed_text(e))
+            if ok or permanent:
+                settled.append(str(e.get("id")))
+                (log.info if ok else log.warning)("owed Telegram message from %s %s", iso(int(e["ts"])),
+                                                  "sent" if ok else f"dropped: {why}")
+            else:
+                break
+        if not settled:
+            return 0
+        try:
+            with lock.hold(timeout=LOCK_WAIT_S) as got:
+                if got:
+                    now = int(self.clock())
+                    items = [e for e in self._read_owed(path) if str(e.get("id")) not in settled]
+                    self._write_owed(path, items, now)
+        except Exception as exc:  # noqa: BLE001
+            self._note("owed", f"owed file {path} unusable ({type(exc).__name__}: {exc})")
+        return len(settled)
 
 
 # --------------------------------------------------------------------------- module API (one worker per process)

@@ -56,6 +56,7 @@ def isolated(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
     monkeypatch.setattr(nt.subprocess, "run", fake_run)
+    monkeypatch.setattr(nt, "TELEGRAM_RETRY_S", (0.0, 0.0))     # D-059: the quick retries happen, without the pauses
     net: list[httpx.Request] = []
     monkeypatch.setattr(nt, "_DEFAULT", nt.Notifier(transport=httpx.MockTransport(
         lambda r: net.append(r) or httpx.Response(599))))
@@ -347,14 +348,179 @@ def test_the_token_and_chat_id_never_reach_a_log_line(tmp_path, live, caplog, is
             assert n.flush(5)
     everything = caplog.text + "\n".join(r.getMessage() for r in caplog.records) + json.dumps(results)
     assert TOKEN not in everything and TOKEN.split(":")[1] not in everything and CHAT not in everything
-    assert [r["telegram"].split(":")[0] for r in results] == ["failed"] * 4
+    # D-059: a refusal is final; a network-side failure keeps the message for a re-send (the owed file)
+    assert [r["telegram"].split(":")[0] for r in results] == ["failed", "owed", "owed", "owed"]
     assert results[0]["telegram"].startswith("failed: HTTP 401 Unauthorized: chat ****")
+    owed = json.loads((tmp_path / "data" / "shared" / nt.OWED_FILE).read_text(encoding="utf-8"))
+    assert len(owed["owed"]) == 3 and TOKEN not in json.dumps(owed) and CHAT not in json.dumps(owed)
     assert "ConnectError" in results[1]["telegram"] and "/bot****" in results[1]["telegram"]
     assert "HTTPStatusError" in results[2]["telegram"] and "/bot****" in results[2]["telegram"]
     httpx_lines = [r.getMessage() for r in caplog.records if r.name == "httpx"]
     assert httpx_lines and all("/bot****/sendMessage" in m for m in httpx_lines)    # httpx's own INFO line
     warned = [r for r in caplog.records if r.name == "notify" and "Telegram sendMessage failed" in r.getMessage()]
     assert warned and all(r.levelno == logging.WARNING for r in warned)
+
+
+# --------------------------------------------------------------------------- D-059: retries and owed messages
+def flaky(fail_times: int, *, raise_exc: bool):
+    """A transport that fails the first ``fail_times`` requests (a ConnectError, or a 502) and then answers ok."""
+    reqs: list[httpx.Request] = []
+
+    def h(req: httpx.Request) -> httpx.Response:
+        reqs.append(req)
+        if len(reqs) <= fail_times:
+            if raise_exc:
+                raise httpx.ConnectError("network down", request=req)
+            return httpx.Response(502, json={"ok": False, "description": "Bad Gateway"})
+        return ok_response(req)
+
+    return httpx.MockTransport(h), reqs
+
+
+def owed_file(tmp_path: Path) -> Path:
+    return tmp_path / "data" / "shared" / nt.OWED_FILE
+
+
+@pytest.mark.parametrize("raise_exc", [True, False])
+def test_a_network_side_failure_is_retried_twice_with_the_pauses(tmp_path, live, isolated, monkeypatch, raise_exc):
+    monkeypatch.setattr(nt, "TELEGRAM_RETRY_S", (2.0, 5.0))
+    transport, reqs = flaky(2, raise_exc=raise_exc)
+    n = nt.Notifier(transport=transport)
+    pauses: list[float] = []
+    n.sleep = pauses.append
+    res = n.submit(settings(tmp_path, toast=False), "info", "XAUUSD BUY placed", "0.01 lots")
+    assert n.flush(5)
+    assert res["telegram"] == "sent" and len(reqs) == 3 and pauses == [2.0, 5.0]
+    assert not owed_file(tmp_path).exists()
+
+
+def test_no_retry_starts_after_the_retry_budget(tmp_path, live, isolated, monkeypatch):
+    """A slow failure (a 10 s timeout) leaves no time for retries inside a tool's flush: the message is kept."""
+    monkeypatch.setattr(nt, "TELEGRAM_RETRY_S", (2.0, 5.0))
+    transport, reqs = flaky(9, raise_exc=True)
+    clock = {"mono": 100.0}
+
+    def slow_transport(req: httpx.Request) -> httpx.Response:
+        clock["mono"] += 10.0                                 # each attempt takes the whole timeout
+        return transport.handler(req)
+
+    n = nt.Notifier(transport=httpx.MockTransport(slow_transport), monotonic=lambda: clock["mono"])
+    n.sleep = lambda s: None
+    res = n.submit(settings(tmp_path, toast=False), "warn", "Escalation failed", "x")
+    assert n.flush(5)
+    assert res["telegram"].startswith("owed: ConnectError") and len(reqs) == 2    # 0 s and 10 s; 12 s budget
+    assert owed_file(tmp_path).exists()
+
+
+def test_a_refusal_by_telegram_is_never_retried_nor_kept(tmp_path, live, isolated):
+    transport, reqs = recorder(lambda req: httpx.Response(403, json={"ok": False, "description": "Forbidden: bot was blocked"}))
+    n = nt.Notifier(transport=transport)
+    res = n.submit(settings(tmp_path, toast=False), "warn", "Escalation failed", "x")
+    assert n.flush(5)
+    assert res["telegram"].startswith("failed: HTTP 403 Forbidden") and len(reqs) == 1
+    assert not owed_file(tmp_path).exists()
+
+
+def test_a_message_no_process_could_send_is_kept_and_sent_by_the_next_one_that_can(tmp_path, live, isolated):
+    s = settings(tmp_path, toast=False)
+    clock = {"now": T0}
+
+    def down(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("network down", request=req)
+
+    a = nt.Notifier(transport=httpx.MockTransport(down), clock=lambda: clock["now"])
+    res = a.submit(s, "info", "XAUUSD trade closed", "mt5 abc: closed_profit +4.20 USD")
+    assert a.flush(5)
+    assert res["telegram"].startswith("owed: ConnectError: network down (kept in notify_owed.json")
+    doc = json.loads(owed_file(tmp_path).read_text(encoding="utf-8"))
+    assert [e["text"] for e in doc["owed"]] == ["[INFO] XAUUSD trade closed\nmt5 abc: closed_profit +4.20 USD"]
+    assert doc["owed"][0]["ts"] == T0 and doc["owed"][0]["claimed_until"] == 0
+    # another process 20 min later with Telegram reachable: its own message first, then what the first one owed
+    clock["now"] = T0 + 20 * MS_PER_MINUTE
+    transport, reqs = recorder()
+    b = nt.Notifier(transport=transport, clock=lambda: clock["now"])
+    assert b.submit(s, "warn", "PC was asleep", "10 min")["queued"]
+    assert b.flush(5)
+    texts = [json.loads(r.content)["text"] for r in reqs]
+    assert texts[0] == "[WARN] PC was asleep\n10 min"
+    assert texts[1].startswith("[رسالة متأخّرة - وقتها 2026-") and texts[1].endswith(
+        " UTC]\n[INFO] XAUUSD trade closed\nmt5 abc: closed_profit +4.20 USD")
+    assert not owed_file(tmp_path).exists()
+
+
+def test_an_idle_worker_sends_what_is_owed_and_drops_what_is_a_day_old(tmp_path, live, isolated):
+    s = settings(tmp_path, toast=False)
+    f = owed_file(tmp_path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    stale = {"id": "old1", "ts": T0 - nt.OWED_MAX_AGE_MS - 1, "level": "info", "text": "[INFO] old", "claimed_until": 0}
+    fresh = {"id": "new1", "ts": T0 - 5 * MS_PER_MINUTE, "level": "info", "text": "[INFO] XAUUSD filled\nx",
+             "claimed_until": 0}
+    f.write_text(json.dumps({"owed": [stale, fresh]}), encoding="utf-8")
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport, clock=lambda: T0)
+    assert n._idle_drain() == 0 and not reqs                 # no Settings seen yet: nothing it can do
+    n._last_s = s
+    assert n._idle_drain() == 1
+    assert [json.loads(r.content)["text"].splitlines()[-2:] for r in reqs] == [["[INFO] XAUUSD filled", "x"]]
+    assert not f.exists()
+    assert n._idle_drain() == 0 and len(reqs) == 1           # nothing left
+
+
+def test_an_entry_another_process_is_sending_is_left_alone_until_its_claim_expires(tmp_path, live, isolated):
+    s = settings(tmp_path, toast=False)
+    f = owed_file(tmp_path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"owed": [{"id": "c1", "ts": T0 - MS_PER_MINUTE, "level": "info", "text": "[INFO] x",
+                                       "claimed_until": T0 + 60_000}]}), encoding="utf-8")
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport, clock=lambda: T0)
+    n._last_s = s
+    assert n._idle_drain() == 0 and not reqs and f.exists()
+    later = nt.Notifier(transport=transport, clock=lambda: T0 + 2 * nt.OWED_CLAIM_MS)
+    later._last_s = s
+    assert later._idle_drain() == 1 and len(reqs) == 1 and not f.exists()
+
+
+def test_the_drain_stops_at_the_first_failure_and_keeps_the_rest(tmp_path, live, isolated):
+    s = settings(tmp_path, toast=False)
+    f = owed_file(tmp_path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"owed": [{"id": f"e{i}", "ts": T0 - (9 - i) * MS_PER_MINUTE, "level": "info",
+                                       "text": f"[INFO] m{i}", "claimed_until": 0} for i in range(3)]}),
+                 encoding="utf-8")
+    reqs: list[httpx.Request] = []
+    calls = {"n": 0}
+
+    def one_then_down(req: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        reqs.append(req)
+        if calls["n"] == 1:
+            return ok_response(req)
+        raise httpx.ConnectError("down again", request=req)
+
+    n = nt.Notifier(transport=httpx.MockTransport(one_then_down), clock=lambda: T0)
+    n._last_s = s
+    assert n._idle_drain() == 1
+    left = json.loads(f.read_text(encoding="utf-8"))["owed"]
+    assert [e["id"] for e in left] == ["e1", "e2"] and all(e["claimed_until"] > T0 for e in left)
+
+
+def test_disabled_or_unconfigured_notifiers_never_drain(tmp_path, monkeypatch, isolated):
+    s = settings(tmp_path, toast=False)
+    f = owed_file(tmp_path)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"owed": [{"id": "a", "ts": T0, "level": "info", "text": "[INFO] x", "claimed_until": 0}]}),
+                 encoding="utf-8")
+    transport, reqs = recorder()
+    n = nt.Notifier(transport=transport, clock=lambda: T0)
+    n._last_s = s
+    assert n._idle_drain() == 0                              # TS_NOTIFY_DISABLE (the suite)
+    monkeypatch.delenv(nt.DISABLE_ENV, raising=False)
+    assert n._idle_drain() == 0                              # no TELEGRAM_* values
+    n._last_s = settings(tmp_path, toast=False, telegram=False)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[0], TOKEN)
+    monkeypatch.setenv(TELEGRAM_SECRET_ENV[1], CHAT)
+    assert n._idle_drain() == 0 and not reqs and f.exists()   # notify.telegram: false
 
 
 # --------------------------------------------------------------------------- limits
