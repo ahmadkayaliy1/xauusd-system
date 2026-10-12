@@ -411,6 +411,12 @@ def score_only(s: Settings) -> int:
 
 
 # --------------------------------------------------------------------------- the loop and its start
+def child_timeout_s(cfg: ScalpCfg) -> int:
+    """How long the loop lets one hourly child live: its gate wait (``gate_retry_min``) plus the run itself
+    (``run_timeout_s``)."""
+    return int(cfg.gate_retry_min) * 60 + int(cfg.run_timeout_s)
+
+
 def spawn_once(s: Settings, *, timeout_s: int, python: str | None = None) -> int | None:
     """One hourly child (``--once --quiet --reason hourly``), waited for; killed with its tree after ``timeout_s``."""
     cmd = [python or sys.executable, str(PROJECT_ROOT / "tools" / "scalp_brief.py"), "--once", "--quiet",
@@ -444,7 +450,9 @@ def loop(s: Settings, *, clock: Callable[[], int] = now_ms, sleep: Callable[[flo
         pcfg = s.pairs[cfg.pair]
         exe = InstrumentRegistry.from_settings(s).with_role(cfg.pair, "execution")[0]
         market_open = calendar_for(exe.venue, exe.symbol, pcfg.asset_class).is_open
-    run = spawn or (lambda: spawn_once(s, timeout_s=cfg.run_timeout_s))
+    # the child may wait up to gate_retry_min for the desk's call / free RAM BEFORE its run: the kill timeout covers
+    # both (2026-10-12: a 600 s timeout killed every hourly run while it was still politely waiting on low RAM)
+    run = spawn or (lambda: spawn_once(s, timeout_s=child_timeout_s(cfg)))
     try:
         started = clock()
         nxt = next_slot(started, cfg)

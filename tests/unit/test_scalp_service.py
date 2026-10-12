@@ -370,3 +370,25 @@ def test_status_doc_and_bad_arguments(tmp_path, monkeypatch):
     assert sv.manual_text([{"open_ms": T, "side": "SELL", "entry": 4196.1, "exit": 4192.9, "pnl_usd": 3.2,
                             "brief_id": "20261013T1000Z", "followed_plan": True}]) == \
         "10-13 10:00 SELL 4196.1 -> 4192.9 +3.20 USD (plan followed)"
+
+
+def test_the_loop_lets_a_child_wait_its_gate_window_before_killing_it(tmp_path, monkeypatch):
+    """2026-10-12: the 600 s run timeout killed every hourly child while it was still waiting (up to gate_retry_min)
+    on low RAM / the desk's call - the loop's kill timeout now covers the gate wait plus the run."""
+    s = settings(tmp_path)
+    assert sv.child_timeout_s(s.scalp) == s.scalp.gate_retry_min * 60 + s.scalp.run_timeout_s == 1800
+    sdir = scalp_dir(s)
+    clock = {"t": T + 30 * MIN}
+
+    def now():
+        clock["t"] += 5 * MIN
+        return clock["t"]
+    calls = []
+
+    def fake_spawn_once(s_, *, timeout_s, python=None):
+        calls.append(timeout_s)
+        (sdir / "STOP").write_text("stop")
+        return 0
+    monkeypatch.setattr(sv, "spawn_once", fake_spawn_once)
+    assert sv.loop(s, clock=now, sleep=lambda x: None, market_open=lambda t: True, poll_s=15) == 0
+    assert calls == [1800]

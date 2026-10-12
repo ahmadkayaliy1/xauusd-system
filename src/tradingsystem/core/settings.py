@@ -832,7 +832,7 @@ class ScalpCfg(_Model):
     level_horizon_min: int = Field(60, ge=5, le=240)    # a level is scored over this window
     hold_window_min: int = Field(30, ge=5, le=240)      # held / broken decided within this long after the touch
     gate_retry_min: int = Field(20, ge=0, le=59)        # a run waits this long for the desk's call / RAM, then skips
-    run_timeout_s: int = Field(600, ge=60, le=1800)
+    run_timeout_s: int = Field(600, ge=60, le=1800)     # the run after its gates (the loop allows gate_retry_min on top)
     manual_lookback_days: int = Field(7, ge=0, le=60)   # the owner's manual deals read from MT5 (0 = never attach)
     notify: bool = True
     notify_level: Literal["info", "warn"] = "info"
