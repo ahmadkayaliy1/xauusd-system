@@ -43,6 +43,7 @@ AUTO_ENTRY_TYPES = ("limit", "stop")
 COMMENT_PREFIX = "sc"                   # the backend tags the order ts:sc<brief id>:1 (<= 31 chars)
 MANAGE_EVERY_S = 60.0
 MIN_LOT = 0.01
+EVERY_MIN_CHOICES = (15, 20, 30, 60, 120)   # D-062: the loop's cadence the owner may pick (minutes between briefs)
 
 
 # ------------------------------------------------------------------------------------------------- settings
@@ -54,15 +55,23 @@ def scalp_magic(s: Settings) -> int:
 
 def default_settings(s: Settings) -> dict:
     return {"mode": "analyze", "lot": float(s.scalp.auto_default_lot), "min_confidence": int(s.scalp.auto_min_confidence),
+            "hours_utc": [int(s.scalp.hours_utc[0]), int(s.scalp.hours_utc[1])], "every_min": 60,
             "updated_ms": None, "by": "default"}
 
 
 def validate_settings(s: Settings, doc: dict) -> tuple[dict | None, str | None]:
-    """``(clean, error)``: the three owner-set values, bounded by the config."""
+    """``(clean, error)``: the owner-set values (mode, lot, confidence floor; D-062 the loop's hours and cadence),
+    bounded by the config."""
+    base = default_settings(s)
     try:
         mode = str(doc.get("mode", "analyze")).strip().lower()
         raw = float(doc.get("lot", s.scalp.auto_default_lot))
         conf = int(doc.get("min_confidence", s.scalp.auto_min_confidence))
+        hours = doc.get("hours_utc", base["hours_utc"])
+        if not isinstance(hours, (list, tuple)) or len(hours) != 2:
+            return None, "hours_utc must be [start, end] in UTC hours"
+        h0, h1 = int(hours[0]), int(hours[1])
+        every = int(doc.get("every_min", 60))
     except (TypeError, ValueError) as exc:
         return None, f"settings: {type(exc).__name__}: {exc}"
     if mode not in MODES:
@@ -74,7 +83,11 @@ def validate_settings(s: Settings, doc: dict) -> tuple[dict | None, str | None]:
         return None, f"lot must be between {MIN_LOT:g} and {s.scalp.auto_max_lot:g} (got {lot:g})"
     if not 0 <= conf <= 100:
         return None, f"min_confidence must be 0-100 (got {conf})"
-    return {"mode": mode, "lot": lot, "min_confidence": conf}, None
+    if not 0 <= h0 < h1 <= 24:
+        return None, f"hours_utc must be [start, end) with 0 <= start < end <= 24 (got [{h0}, {h1}])"
+    if every not in EVERY_MIN_CHOICES:
+        return None, f"every_min must be one of {', '.join(str(x) for x in EVERY_MIN_CHOICES)} (got {every})"
+    return {"mode": mode, "lot": lot, "min_confidence": conf, "hours_utc": [h0, h1], "every_min": every}, None
 
 
 def read_settings(s: Settings) -> dict:
@@ -90,16 +103,24 @@ def read_settings(s: Settings) -> dict:
     return {**clean, "updated_ms": doc.get("updated_ms"), "by": doc.get("by") or "dashboard"}
 
 
-def write_settings(s: Settings, *, mode: str, lot: float, min_confidence: int, by: str = "dashboard",
-                   now: int | None = None) -> dict:
-    """Validate and store (atomic). Raises ``ValueError`` with the reason."""
-    clean, err = validate_settings(s, {"mode": mode, "lot": lot, "min_confidence": min_confidence})
+def write_settings(s: Settings, *, by: str = "dashboard", now: int | None = None, **changes: Any) -> dict:
+    """Validate and store (atomic) the given values over the current ones (a partial update keeps the rest).
+    Raises ``ValueError`` with the reason."""
+    cur = read_settings(s)
+    clean, err = validate_settings(s, {**{k: v for k, v in cur.items() if k not in ("updated_ms", "by")}, **changes})
     if err:
         raise ValueError(err)
     doc = {**clean, "updated_ms": int(now if now is not None else now_ms()), "by": by}
     write_json_atomic(scalp_dir(s) / SETTINGS_FILE, doc)
-    log.info("scalp settings: mode %s, lot %g, min confidence %d (%s)", doc["mode"], doc["lot"], doc["min_confidence"], by)
+    log.info("scalp settings: mode %s, lot %g, min confidence %d, hours %s UTC every %d min (%s)", doc["mode"], doc["lot"],
+             doc["min_confidence"], doc["hours_utc"], doc["every_min"], by)
     return doc
+
+
+def schedule(s: Settings) -> tuple[list[int], int]:
+    """D-062: ``(hours_utc, every_min)`` the loop and the hourly gate follow (the owner's settings, else the config)."""
+    st = read_settings(s)
+    return [int(st["hours_utc"][0]), int(st["hours_utc"][1])], int(st["every_min"])
 
 
 def execution_text(s: Settings, settings: dict, equity: float | None) -> str:

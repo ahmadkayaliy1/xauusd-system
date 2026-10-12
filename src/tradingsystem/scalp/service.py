@@ -45,7 +45,8 @@ MANAGE_EVERY_MS = 60_000           # D-061: the loop looks after the auto-trades
 STATUS_EVERY_MS = 60_000           # the loop rewrites status.json this often while idle
 OPERATOR_LOCK = "operator_session.lock"
 REASONS = ("hourly", "dashboard", "manual")
-STATUS_KEYS = ("pid", "loop_started_ms", "last_run_ms", "last_outcome", "next_run_ms", "last_error", "last_id")
+STATUS_KEYS = ("pid", "loop_started_ms", "last_run_ms", "last_outcome", "next_run_ms", "last_error", "last_id",
+               "hours_utc", "every_min")        # D-062: the schedule the loop follows
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
@@ -101,15 +102,17 @@ def status_rows(app_db: Path, now: int) -> tuple[dict | None, float | None, floa
 # --------------------------------------------------------------------------- the pure decisions
 def gate(now: int, cfg: ScalpCfg, *, engine_detail: dict | None, engine_age_s: float | None,
          executor_age_s: float | None, free_ram_mb: float | None, used_today: int, market_open: bool,
-         hourly: bool) -> tuple[str, str]:
+         hourly: bool, hours_utc: list[int] | tuple[int, int] | None = None) -> tuple[str, str]:
     """One look at the gates: ``("run", note)`` | ``("wait", why)`` (looked at again) | ``("skip", why)`` (this
-    run is over). ``hourly`` runs keep to ``hours_utc``; an on-demand run ignores the hours."""
+    run is over). ``hourly`` runs keep to ``hours_utc`` (D-062: the owner's dashboard setting, else the config's);
+    an on-demand run ignores the hours."""
     if not cfg.enabled:
         return "skip", "disabled"
     if not market_open:
         return "skip", "market_closed"
     hour = dt.datetime.fromtimestamp(now / 1000, dt.timezone.utc).hour
-    if hourly and not (cfg.hours_utc[0] <= hour < cfg.hours_utc[1]):
+    h0, h1 = hours_utc or cfg.hours_utc
+    if hourly and not (h0 <= hour < h1):
         return "skip", "outside_hours"
     if used_today >= cfg.max_per_day:
         return "skip", f"daily_cap ({used_today}/{cfg.max_per_day})"
@@ -125,17 +128,22 @@ def gate(now: int, cfg: ScalpCfg, *, engine_detail: dict | None, engine_age_s: f
     return "run", "; ".join(notes) or "ok"
 
 
-def next_slot(now: int, cfg: ScalpCfg) -> int:
-    """The next hourly run after ``now``: the first full hour in ``hours_utc`` plus ``run_offset_s`` (UTC ms)."""
-    h0, h1 = cfg.hours_utc
+def next_slot(now: int, cfg: ScalpCfg, hours_utc: list[int] | tuple[int, int] | None = None,
+              every_min: int = 60) -> int:
+    """The next scheduled run after ``now``: the first slot in ``hours_utc`` (D-062: the owner's setting, else the
+    config's) at every ``every_min`` minutes from the window's start, plus ``run_offset_s`` (UTC ms)."""
+    h0, h1 = hours_utc or cfg.hours_utc
     off = cfg.run_offset_s * 1000
+    step = max(1, int(every_min)) * MS_PER_MINUTE
     day0 = now // MS_PER_DAY * MS_PER_DAY
     for d in range(0, 3):
-        for h in range(h0, h1):
-            t = day0 + d * MS_PER_DAY + h * MS_PER_HOUR + off
+        start, end = day0 + d * MS_PER_DAY + h0 * MS_PER_HOUR, day0 + d * MS_PER_DAY + h1 * MS_PER_HOUR
+        t = start + off
+        while t < end + off:
             if t > now:
                 return t
-    raise ValueError("scalp.hours_utc has no hour")      # unreachable: the config validator needs start < end
+            t += step
+    raise ValueError("scalp.hours_utc has no hour")      # unreachable: the validators need start < end
 
 
 def horizon_min(rec: dict, cfg: ScalpCfg) -> int:
@@ -167,8 +175,9 @@ def status_doc(s: Settings) -> dict:
     if not running:
         lock.release()
     ids = list_ids(s, 1)
+    hours, every = _mod("autotrade").schedule(s)
     return {**doc, "loop_running": running, "stop_file": (sdir / "STOP").exists(), "latest_id": ids[0] if ids else None,
-            "enabled": s.scalp.enabled, "hours_utc": list(s.scalp.hours_utc)}
+            "enabled": s.scalp.enabled, "hours_utc": hours, "every_min": every, "config_hours_utc": list(s.scalp.hours_utc)}
 
 
 # --------------------------------------------------------------------------- one run
@@ -205,13 +214,14 @@ def run_once(s: Settings, *, reason: str = "manual", no_model: bool = False, fix
             usage = UsageStore(usage_db(s))
             tz = s.ai.providers[provider_name(s)].quota_reset_tz
             deadline = time.monotonic() + cfg.gate_retry_min * 60
+            hours, _every = _mod("autotrade").schedule(s)          # D-062: the owner's hours
             while True:
                 t = clock()
                 eng, eng_age, exe_age = status_rows(s.paths.state() / "app.db", t)
                 used = usage.count_role_since("scalp", quota_day_start(t, tz))
                 kind, why = gate(t, cfg, engine_detail=eng, engine_age_s=eng_age, executor_age_s=exe_age,
                                  free_ram_mb=_free_ram_mb(), used_today=used, market_open=cal.is_open(t),
-                                 hourly=reason == "hourly")
+                                 hourly=reason == "hourly", hours_utc=hours)
                 if kind == "run" and not op_lock.acquire(0):
                     kind, why = "wait", "operator_session"
                 if kind == "run":
@@ -476,11 +486,13 @@ def loop(s: Settings, *, clock: Callable[[], int] = now_ms, sleep: Callable[[flo
     run = spawn or (lambda: spawn_once(s, timeout_s=child_timeout_s(cfg)))
     tick = manage or (lambda: _manage_tick(s))
     managed = 0
+    sched = _mod("autotrade").schedule          # D-062: hours + cadence from the owner's settings, re-read every minute
     try:
         started = clock()
-        nxt = next_slot(started, cfg)
-        update_status(s, pid=os.getpid(), loop_started_ms=started, next_run_ms=nxt)
-        log.info("scalp loop started (pid %d): hours %s UTC, next run at %s", os.getpid(), cfg.hours_utc,
+        hours, every = sched(s)
+        nxt = next_slot(started, cfg, hours, every)
+        update_status(s, pid=os.getpid(), loop_started_ms=started, next_run_ms=nxt, hours_utc=hours, every_min=every)
+        log.info("scalp loop started (pid %d): hours %s UTC every %d min, next run at %s", os.getpid(), hours, every,
                  dt.datetime.fromtimestamp(nxt / 1000, dt.timezone.utc).isoformat(timespec="seconds"))
         written = started
         while not (sdir / "STOP").exists():
@@ -491,12 +503,19 @@ def loop(s: Settings, *, clock: Callable[[], int] = now_ms, sleep: Callable[[flo
                     log.info("scalp: hourly run ended with %s", code)
                 else:
                     log.info("scalp: slot skipped - the market is closed")
-                nxt = next_slot(clock(), cfg)
+                hours, every = sched(s)
+                nxt = next_slot(clock(), cfg, hours, every)
                 written = clock()
-                update_status(s, pid=os.getpid(), next_run_ms=nxt)
+                update_status(s, pid=os.getpid(), next_run_ms=nxt, hours_utc=hours, every_min=every)
             elif t - written >= STATUS_EVERY_MS:
                 written = t
-                update_status(s, pid=os.getpid(), next_run_ms=nxt)
+                new_hours, new_every = sched(s)
+                if (new_hours, new_every) != (hours, every):
+                    hours, every = new_hours, new_every
+                    nxt = next_slot(t, cfg, hours, every)
+                    log.info("scalp loop: schedule changed from the dashboard - hours %s UTC every %d min, next run at %s",
+                             hours, every, dt.datetime.fromtimestamp(nxt / 1000, dt.timezone.utc).isoformat(timespec="seconds"))
+                update_status(s, pid=os.getpid(), next_run_ms=nxt, hours_utc=hours, every_min=every)
             if t - managed >= MANAGE_EVERY_MS:              # D-061: the open scalp order / position
                 managed = t
                 tick()

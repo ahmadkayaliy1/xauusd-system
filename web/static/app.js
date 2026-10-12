@@ -625,7 +625,8 @@ function scStatusText(d) {
   if (st.last_run_ms) parts.push(`last run ${scHM(st.last_run_ms)} ${esc(txt(st.last_outcome, 80))}`);
   if (st.next_run_ms) parts.push(`next ${scHM(st.next_run_ms)} UTC`);
   if (st.last_error) parts.push(`<span class="fail">${esc(txt(st.last_error, 120))}</span>`);
-  parts.push(`hours [${esc((d.config?.hours_utc || []).join(", "))}) UTC · ≤ ${esc(d.config?.max_per_day)}/day · ${esc(d.config?.model)} / ${esc(d.config?.effort)}`);
+  const sch = d.auto?.settings || {};
+  parts.push(`hours [${esc((sch.hours_utc || d.config?.hours_utc || []).join(", "))}) UTC every ${esc(sch.every_min ?? 60)} min · ≤ ${esc(d.config?.max_per_day)}/day · ${esc(d.config?.model)} / ${esc(d.config?.effort)}`);
   return parts.join(" · ");
 }
 
@@ -638,21 +639,32 @@ function scAutoText(a) {
   return head + tracked;
 }
 
+function scLocalHours(h0, h1) {
+  // the owner's window in the browser's local time (D-062): a UTC hour today -> local HH:MM
+  const d = new Date(), fmt = (h) => { const x = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), h % 24, 0)); return x.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); };
+  if (!(h0 >= 0 && h1 > h0 && h1 <= 24)) return "";
+  return `= ${fmt(h0)} – ${fmt(h1)} your time · ${Math.max(0, Math.round((h1 - h0) * 60 / Number($("#sc-every")?.value || 60)))} runs/day`;
+}
+
 function scFillSettings(a) {
   const st = (a && a.settings) || {};
   if ($("#sc-mode") && st.mode) $("#sc-mode").value = st.mode;
   if ($("#sc-lot") && st.lot != null) { $("#sc-lot").value = st.lot; if (a.max_lot) $("#sc-lot").max = a.max_lot; }
   if ($("#sc-minconf") && st.min_confidence != null) $("#sc-minconf").value = st.min_confidence;
+  if ($("#sc-h0") && Array.isArray(st.hours_utc)) { $("#sc-h0").value = st.hours_utc[0]; $("#sc-h1").value = st.hours_utc[1]; }
+  if ($("#sc-every") && st.every_min != null) $("#sc-every").value = String(st.every_min);
+  if ($("#sc-local")) $("#sc-local").textContent = scLocalHours(Number($("#sc-h0")?.value), Number($("#sc-h1")?.value));
   if ($("#sc-auto-state")) $("#sc-auto-state").innerHTML = scAutoText(a);
 }
 
 async function saveScalpSettings() {
   const mode = $("#sc-mode").value, lot = Number($("#sc-lot").value), min_confidence = Number($("#sc-minconf").value);
+  const hours_utc = [Number($("#sc-h0").value), Number($("#sc-h1").value)], every_min = Number($("#sc-every").value);
   const warn = mode === "auto" ? `\n\nAUTO EXECUTION: from the next brief on, THE trade (the plan that passed the code checks, confidence >= ${min_confidence}) is placed as a pending order with ${lot} lots on the ${(STATUS_SC?.auto?.execution_mode) || "demo"} account - one at a time, risk <= ${(STATUS_SC?.auto?.risk_cap_pct) || 5} % of equity, closed after the plan's hold time.` : "";
-  if (!confirm(`Save the scalp settings?\n\nmode: ${mode}\nlot: ${lot}\nmin confidence: ${min_confidence}${warn}`)) return;
+  if (!confirm(`Save the scalp settings?\n\nmode: ${mode}\nlot: ${lot}\nmin confidence: ${min_confidence}\nhours: ${hours_utc[0]}-${hours_utc[1]} UTC (${scLocalHours(hours_utc[0], hours_utc[1])}) every ${every_min} min${warn}`)) return;
   try {
-    const r = await api("/api/scalp/settings", { method: "POST", headers: { "X-Dashboard-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify({ mode, lot, min_confidence }) });
-    alert(`Saved: mode ${r.settings.mode}, lot ${r.settings.lot}, min confidence ${r.settings.min_confidence}`);
+    const r = await api("/api/scalp/settings", { method: "POST", headers: { "X-Dashboard-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify({ mode, lot, min_confidence, hours_utc, every_min }) });
+    alert(`Saved: mode ${r.settings.mode}, lot ${r.settings.lot}, min confidence ${r.settings.min_confidence}, hours ${r.settings.hours_utc[0]}-${r.settings.hours_utc[1]} UTC every ${r.settings.every_min} min\n(the loop picks the new schedule up within a minute)`);
     loadScalp();
   } catch (e) { alert(`NOT saved: ${e.message}`); }
 }
@@ -744,6 +756,7 @@ async function runScalp() {
   $("#sc-refresh").addEventListener("click", loadScalp);
   $("#sc-run").addEventListener("click", runScalp);
   $("#sc-save").addEventListener("click", saveScalpSettings);
+  ["#sc-h0", "#sc-h1", "#sc-every"].forEach((sel) => $(sel).addEventListener("input", () => { $("#sc-local").textContent = scLocalHours(Number($("#sc-h0").value), Number($("#sc-h1").value)); }));
   $("#sc-body").addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-id]");
     if (tr) showScalp(tr.dataset.id);

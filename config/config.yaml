@@ -395,7 +395,8 @@ evaluation:                            # the demo evaluation window (D-046/D-047
 scalp:                                 # D-058 (owner, 2026-10-12): the manual-scalping brief - SEPARATE from the desk
   enabled: false                       # tools\scalp_brief.py (+ scripts\start_scalp.bat); the dashboard's Scalp tab
   pair: XAUUSD                         # never places an order; its calls (role scalp, no pair) are outside the desk's caps
-  hours_utc: [7, 16]                   # hourly runs at [start, end) UTC = London + New York; the dashboard button any time
+  hours_utc: [7, 16]                   # the DEFAULT window [start, end) UTC (London + New York); the owner sets the hours and the
+                                       # cadence (every 15/20/30/60/120 min) on the Scalp tab (D-062); the button runs any time
   run_offset_s: 20                     # seconds after the full hour (the closed 5m bar must be stored first)
   max_per_day: 12                      # model calls (ledger rows: a repair counts) per UTC day, hourly + on demand (~0.2 % of the weekly meter each on Fable)
   charts: [1h, 15m, 5m]                # its own chart images (data\scalp\charts), not the desk's six

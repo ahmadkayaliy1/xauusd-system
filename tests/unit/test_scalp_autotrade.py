@@ -86,9 +86,11 @@ def fake_attach(be: FakeBackend):
 # ------------------------------------------------------------------------------------------- settings
 def test_settings_defaults_roundtrip_and_bounds(tmp_path):
     s = settings(tmp_path)
-    assert at.read_settings(s) == {"mode": "analyze", "lot": 0.01, "min_confidence": 55, "updated_ms": None, "by": "default"}
+    assert at.read_settings(s) == {"mode": "analyze", "lot": 0.01, "min_confidence": 55, "hours_utc": [7, 16],
+                                   "every_min": 60, "updated_ms": None, "by": "default"}
     doc = at.write_settings(s, mode="auto", lot=0.02, min_confidence=60, now=T)
-    assert doc == {"mode": "auto", "lot": 0.02, "min_confidence": 60, "updated_ms": T, "by": "dashboard"}
+    assert doc == {"mode": "auto", "lot": 0.02, "min_confidence": 60, "hours_utc": [7, 16], "every_min": 60,
+                   "updated_ms": T, "by": "dashboard"}
     assert at.read_settings(s) == doc and json.loads((scalp_dir(s) / at.SETTINGS_FILE).read_text(encoding="utf-8")) == doc
     for bad in ({"mode": "yolo", "lot": 0.01, "min_confidence": 50}, {"mode": "auto", "lot": 0.5, "min_confidence": 50},
                 {"mode": "auto", "lot": 0.005, "min_confidence": 50}, {"mode": "auto", "lot": 0.015, "min_confidence": 50},
@@ -293,3 +295,21 @@ def test_the_auto_trades_are_read_with_their_brief_and_count_as_followed_plans()
     assert sc.manual_trades(deals, symbol="XAUUSD@", server_to_utc=lambda ms: ms, t0=T, t1=T + 3_600_000) \
         and all(not r["auto"] for r in sc.manual_trades(deals, symbol="XAUUSD@", server_to_utc=lambda ms: ms, t0=T,
                                                         t1=T + 3_600_000))
+
+
+# ------------------------------------------------------------------------------------------- D-062: the schedule
+def test_hours_and_cadence_are_owner_settings_with_partial_updates(tmp_path):
+    s = settings(tmp_path)
+    st = at.read_settings(s)
+    assert st["hours_utc"] == [7, 16] and st["every_min"] == 60 and at.schedule(s) == ([7, 16], 60)
+    doc = at.write_settings(s, hours_utc=[9, 18], every_min=30, now=T)
+    assert doc["hours_utc"] == [9, 18] and doc["every_min"] == 30 and doc["mode"] == "analyze" and doc["lot"] == 0.01
+    assert at.write_settings(s, mode="auto", now=T)["hours_utc"] == [9, 18]      # a partial update keeps the rest
+    assert at.schedule(s) == ([9, 18], 30)
+    for bad in ({"hours_utc": [16, 7]}, {"hours_utc": [7, 25]}, {"hours_utc": [7]}, {"hours_utc": "7-16"},
+                {"every_min": 45}, {"every_min": 0}, {"every_min": "x"}):
+        with pytest.raises(ValueError):
+            at.write_settings(s, **bad)
+    assert at.schedule(s) == ([9, 18], 30)
+    (scalp_dir(s) / at.SETTINGS_FILE).write_text('{"mode": "auto", "lot": 0.01, "min_confidence": 50}', encoding="utf-8")
+    assert at.read_settings(s)["hours_utc"] == [7, 16] and at.read_settings(s)["every_min"] == 60   # older file: defaults

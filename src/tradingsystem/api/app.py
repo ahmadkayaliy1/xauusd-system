@@ -622,14 +622,14 @@ def create_app(s: Settings) -> FastAPI:
         if not isinstance(body, dict):
             raise HTTPException(400, "a JSON object is needed")
         from ..scalp import autotrade
-        cur = autotrade.read_settings(s)
+        changes = {k: body[k] for k in ("mode", "lot", "min_confidence", "hours_utc", "every_min") if k in body}
         try:
-            doc = autotrade.write_settings(s, mode=body.get("mode", cur["mode"]), lot=body.get("lot", cur["lot"]),
-                                           min_confidence=body.get("min_confidence", cur["min_confidence"]))
+            doc = autotrade.write_settings(s, **changes)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
         log.info("scalp settings changed from the dashboard: %s", doc)
-        _notify(s, "info", f"Scalp settings: mode {doc['mode']}, lot {doc['lot']:g}, min confidence {doc['min_confidence']}",
+        _notify(s, "info", f"Scalp settings: mode {doc['mode']}, lot {doc['lot']:g}, min confidence {doc['min_confidence']}, "
+                           f"hours {doc['hours_utc'][0]:02d}-{doc['hours_utc'][1]:02d} UTC every {doc['every_min']} min",
                 "from the dashboard" + (" - AUTO EXECUTION ON: the next brief's trade is placed" if doc["mode"] == "auto"
                                         else " - analysis only"), key="scalp:settings")
         return JSONResponse({"saved": True, "settings": doc})

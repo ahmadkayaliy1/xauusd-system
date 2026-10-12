@@ -393,3 +393,51 @@ def test_the_loop_lets_a_child_wait_its_gate_window_before_killing_it(tmp_path, 
     monkeypatch.setattr(sv, "spawn_once", fake_spawn_once)
     assert sv.loop(s, clock=now, sleep=lambda x: None, market_open=lambda t: True, poll_s=15) == 0
     assert calls == [1800]
+
+
+# ------------------------------------------------------------------ D-062: the schedule from the dashboard
+def test_next_slot_follows_the_owner_hours_and_cadence(tmp_path):
+    s = settings(tmp_path)
+    cfg = s.scalp
+    day0 = T - 10 * H
+    assert sv.next_slot(day0 + 6 * H + 30 * MIN, cfg, [9, 12], 60) == day0 + 9 * H + 20_000
+    assert sv.next_slot(day0 + 9 * H + 25_000, cfg, [9, 12], 30) == day0 + 9 * H + 30 * MIN + 20_000
+    assert sv.next_slot(day0 + 11 * H + 45 * MIN, cfg, [9, 12], 30) == day0 + 24 * H + 9 * H + 20_000   # 11:30 was the last
+    assert sv.next_slot(day0 + 9 * H, cfg, [9, 12], 120) == day0 + 9 * H + 20_000
+    assert sv.next_slot(day0 + 9 * H + 20_000, cfg, [9, 12], 120) == day0 + 11 * H + 20_000
+    assert sv.next_slot(day0 + 11 * H + 20_000, cfg, [9, 12], 120) == day0 + 24 * H + 9 * H + 20_000
+    assert sv.next_slot(T + 10_000, cfg) == T + 20_000                                                 # the old call
+
+
+def test_the_gate_keeps_the_owner_hours_for_scheduled_runs_only(tmp_path):
+    base = dict(engine_detail={"cycles_inflight": {}}, engine_age_s=5.0, executor_age_s=5.0, free_ram_mb=4000.0,
+                used_today=0, market_open=True)
+    cfg = settings(tmp_path).scalp
+    assert sv.gate(T, cfg, hourly=True, hours_utc=[11, 16], **base) == ("skip", "outside_hours")      # 10:00 UTC
+    assert sv.gate(T, cfg, hourly=True, hours_utc=[9, 11], **base)[0] == "run"
+    assert sv.gate(T, cfg, hourly=False, hours_utc=[11, 16], **base)[0] == "run"                       # the button
+    assert sv.gate(T, cfg, hourly=True, **base)[0] == "run"                                            # config [7, 16)
+
+
+def test_the_loop_picks_a_changed_schedule_up_within_a_minute(tmp_path):
+    from tradingsystem.scalp import autotrade as at
+    s = settings(tmp_path)
+    sdir = scalp_dir(s)
+    at.write_settings(s, hours_utc=[12, 16], every_min=60, now=T)        # 10:05 -> the next slot would be 12:00:20
+    clock = {"t": T + 5 * MIN}
+
+    def now():
+        clock["t"] += MIN
+        if clock["t"] == T + 12 * MIN:
+            at.write_settings(s, hours_utc=[10, 16], every_min=30, now=clock["t"])   # the owner moves it: 10:30 is next
+        return clock["t"]
+    spawned = []
+
+    def spawn():
+        spawned.append(clock["t"])
+        (sdir / "STOP").write_text("stop")
+        return 0
+    rc = sv.loop(s, clock=now, sleep=lambda x: None, spawn=spawn, market_open=lambda t: True, poll_s=15)
+    assert rc == 0 and len(spawned) == 1 and T + 30 * MIN < spawned[0] <= T + 40 * MIN   # the 10:30 slot, not 12:00
+    st = read_json(sdir / "status.json")
+    assert st["hours_utc"] == [10, 16] and st["every_min"] == 30

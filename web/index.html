@@ -110,6 +110,8 @@
         <label class="small">Execution <select id="sc-mode"><option value="analyze">analyze only (I trade by hand)</option><option value="auto">AUTO: place the brief's trade</option></select></label>
         <label class="small">Lot <input id="sc-lot" type="number" step="0.01" min="0.01" max="0.10" value="0.01" style="width:5em"></label>
         <label class="small">Min confidence <input id="sc-minconf" type="number" step="1" min="0" max="100" value="55" style="width:4em"></label>
+        <label class="small" title="D-062: the loop's window in UTC hours [from, to) - the local time is shown next to it">Hours UTC <input id="sc-h0" type="number" step="1" min="0" max="23" value="7" style="width:3.5em"> to <input id="sc-h1" type="number" step="1" min="1" max="24" value="16" style="width:3.5em"> <span id="sc-local" class="muted"></span></label>
+        <label class="small">every <select id="sc-every"><option value="15">15 min</option><option value="20">20 min</option><option value="30">30 min</option><option value="60" selected>60 min</option><option value="120">120 min</option></select></label>
         <button id="sc-save" class="primary">Save</button>
         <span id="sc-auto-state" class="small muted">—</span>
       </div>
