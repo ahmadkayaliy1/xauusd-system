@@ -410,6 +410,14 @@ scalp:                                 # D-058 (owner, 2026-10-12): the manual-s
   gate_retry_min: 20                   # a run waits this long for the desk's call / free RAM, then skips the hour
   run_timeout_s: 600                   # the run itself, after its gates; the loop kills a child only after gate_retry_min + this
   manual_lookback_days: 7              # the owner's manual deals (magic 0) read from the running MT5 terminal; 0 = never
+  # D-061 (2026-10-12): auto execution of THE trade - the owner switches mode (analyze | auto), the fixed lot and the
+  # confidence floor on the Scalp tab (data\scalp\settings.json, no restart); the bounds and facts live here
+  auto_magic_offset: 9                 # the scalp trades' magic = execution.magic base + 9 (the desk counts them as siblings)
+  auto_default_lot: 0.01
+  auto_max_lot: 0.10                   # the dashboard refuses a bigger lot
+  auto_min_confidence: 55              # the default floor: a plan under it is analysed, never placed
+  auto_risk_cap_pct: 5.0               # |entry - stop| x lot x contract_size must stay under this % of equity
+  contract_size: 100                   # XAUUSD: 100 oz per lot
   notify: true                         # core/notify: toast + Telegram (TELEGRAM_* in .env, docs/notifications.md H18)
   notify_level: info
   manual_risk_cap_pct: 5.0             # the recommendation shown on the page; the owner's risk numbers stay the owner's

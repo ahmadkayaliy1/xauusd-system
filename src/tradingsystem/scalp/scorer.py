@@ -233,13 +233,16 @@ def _money(d) -> float:
     return sum(float(getattr(d, k, 0) or 0) for k in ("profit", "commission", "swap", "fee"))
 
 
-def manual_trades(deals, *, symbol: str, server_to_utc: Callable[[int], int], t0: int, t1: int) -> list[dict]:
-    """The owner's manual trades (magic 0 on ``symbol``) opened in ``[t0, t1]`` UTC, one row per position: the IN
-    deal gives side / entry / open time, the OUT (and OUT_BY) deals the exit and close time; P&L = profit +
-    commission + swap + fee over every deal of the position. A position without an OUT yet is ``open``."""
+def manual_trades(deals, *, symbol: str, server_to_utc: Callable[[int], int], t0: int, t1: int,
+                  auto_magic: int | None = None) -> list[dict]:
+    """The owner's manual trades (magic 0 on ``symbol``) - and, D-061, the scalp's own auto-trades (``auto_magic``,
+    ``auto: True``, their brief in the comment) - opened in ``[t0, t1]`` UTC, one row per position: the IN deal
+    gives side / entry / open time, the OUT (and OUT_BY) deals the exit and close time; P&L = profit + commission +
+    swap + fee over every deal of the position. A position without an OUT yet is ``open``."""
     by_pos: dict[int, list] = {}
     for d in deals or ():
-        if int(getattr(d, "magic", 0) or 0) != 0 or getattr(d, "symbol", None) != symbol:
+        magic = int(getattr(d, "magic", 0) or 0)
+        if (magic != 0 and magic != auto_magic) or getattr(d, "symbol", None) != symbol:
             continue
         by_pos.setdefault(int(getattr(d, "position_id", 0) or 0), []).append(d)
     out = []
@@ -259,7 +262,7 @@ def manual_trades(deals, *, symbol: str, server_to_utc: Callable[[int], int], t0
             "open_ms": open_ms, "close_ms": None, "volume": round(vol_in, 2),
             "pnl_usd": round(sum(_money(d) for d in ds), 2),
             "open": not outs, "comment": str(getattr(ins[0], "comment", "") or ""), "brief_id": None,
-            "followed_plan": False}
+            "followed_plan": False, "auto": auto_magic is not None and int(getattr(ins[0], "magic", 0) or 0) == auto_magic}
         if outs:
             vol_out = sum(float(d.volume) for d in outs) or 1.0
             row["exit"] = round(sum(float(d.price) * float(d.volume) for d in outs) / vol_out, 3)
@@ -276,6 +279,12 @@ def attribute(trades: list[dict], records: list[dict], tol: float) -> None:
                   key=lambda r: int(r["as_of_ms"]))
     for tr in trades:
         tr["brief_id"], tr["followed_plan"] = None, False
+        if tr.get("auto"):                               # D-061: the comment names the brief; it IS the plan
+            from .autotrade import brief_id_of
+            bid = brief_id_of(tr.get("comment"))
+            if bid and any(r.get("id") == bid for r in recs):
+                tr["brief_id"], tr["followed_plan"] = bid, True
+                continue
         open_ms = int(tr.get("open_ms") or 0)
         rec = None
         for r in recs:

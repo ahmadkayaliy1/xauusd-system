@@ -565,8 +565,13 @@ function scBriefHTML(rec, stats) {
   const warn = esc(txt(b.desk_warning, 400)), note = esc(txt(b.confidence_note, 300));
   const trade = rec.trade || {}, tradeText = esc(txt(trade.text || b.trade_call || "", 500)), tradeLine = esc(txt(trade.line, 300));
   const tradeIdx = Number.isInteger(trade.idx) ? trade.idx : null;
+  const ex = rec.execution || null;
+  const exLine = ex ? (ex.decision === "placed" ? `<span class="pass">AUTO: ${esc(ex.order_type)} ${esc(ex.lot)} @ ${esc(ex.entry)} placed (ticket ${esc(ex.ticket)}, SL ${esc(ex.stop)} / TP ${esc(ex.target)}, expires ${tSafe(ex.expires_ms)}, hold ${esc(ex.max_hold_min)} min)</span>`
+    : ex.decision === "analyze" ? `<span class="muted">execution: by hand (mode analyze, lot ${esc(ex.lot)})</span>`
+    : `<span class="${ex.decision === "failed" ? "fail" : "muted"}">AUTO ${esc(ex.decision)}: ${esc(txt(ex.why, 200))}</span>`) : "";
   const prose = `<h2>The trade now (الصفقة المقترحة)${tradeIdx != null ? ` <span class="small muted">plan ${esc(tradeIdx + 1)}</span>` : ""}</h2>
     <p class="prewrap ar" dir="auto"><b>${tradeText || "—"}</b>${tradeLine ? `<br><span class="small">${tradeLine}</span>` : ""}${(trade.rejected || []).length ? `<br><span class="small fail">the model's own choice failed: ${esc((trade.rejected || []).join(", "))}</span>` : ""}</p>
+    ${exLine ? `<p class="small">${exLine}</p>` : ""}
     <h2>The picture (الصورة)</h2><p class="prewrap ar" dir="auto">${esc(b.picture)}</p>
     <h2>What to expect (المتوقَّع)</h2><p class="prewrap ar" dir="auto">${esc(b.expect)}</p>
     ${warn ? `<h2>The desk (تحذير النظام الآلي)</h2><p class="prewrap ar fail" dir="auto">${warn}</p>` : ""}`;
@@ -624,12 +629,41 @@ function scStatusText(d) {
   return parts.join(" · ");
 }
 
+function scAutoText(a) {
+  if (!a) return "—";
+  const st = a.settings || {}, open = a.open || [];
+  const head = st.mode === "auto" ? `<b class="fail">AUTO ON</b> · lot ${esc(st.lot)} · min conf ${esc(st.min_confidence)} · risk cap ${esc(a.risk_cap_pct)} % · ${esc(a.execution_mode)} account`
+    : `<b>analyze only</b> · lot ${esc(st.lot)} (the brief's arithmetic) · min conf ${esc(st.min_confidence)}`;
+  const tracked = open.length ? ` · open: ${open.map((o) => `${esc(o.side)} ${esc(o.stage)} @ ${esc(o.entry)} (${esc(o.brief_id)})`).join(", ")}` : " · nothing open";
+  return head + tracked;
+}
+
+function scFillSettings(a) {
+  const st = (a && a.settings) || {};
+  if ($("#sc-mode") && st.mode) $("#sc-mode").value = st.mode;
+  if ($("#sc-lot") && st.lot != null) { $("#sc-lot").value = st.lot; if (a.max_lot) $("#sc-lot").max = a.max_lot; }
+  if ($("#sc-minconf") && st.min_confidence != null) $("#sc-minconf").value = st.min_confidence;
+  if ($("#sc-auto-state")) $("#sc-auto-state").innerHTML = scAutoText(a);
+}
+
+async function saveScalpSettings() {
+  const mode = $("#sc-mode").value, lot = Number($("#sc-lot").value), min_confidence = Number($("#sc-minconf").value);
+  const warn = mode === "auto" ? `\n\nAUTO EXECUTION: from the next brief on, THE trade (the plan that passed the code checks, confidence >= ${min_confidence}) is placed as a pending order with ${lot} lots on the ${(STATUS_SC?.auto?.execution_mode) || "demo"} account - one at a time, risk <= ${(STATUS_SC?.auto?.risk_cap_pct) || 5} % of equity, closed after the plan's hold time.` : "";
+  if (!confirm(`Save the scalp settings?\n\nmode: ${mode}\nlot: ${lot}\nmin confidence: ${min_confidence}${warn}`)) return;
+  try {
+    const r = await api("/api/scalp/settings", { method: "POST", headers: { "X-Dashboard-Token": TOKEN, "Content-Type": "application/json" }, body: JSON.stringify({ mode, lot, min_confidence }) });
+    alert(`Saved: mode ${r.settings.mode}, lot ${r.settings.lot}, min confidence ${r.settings.min_confidence}`);
+    loadScalp();
+  } catch (e) { alert(`NOT saved: ${e.message}`); }
+}
+
 async function loadScalp() {
   const box = $("#sc-body"), status = $("#sc-status");
   let d;
   try { d = await api("/api/scalp?limit=30"); } catch (e) { return showError(box, e); }
   STATUS_SC = d;
   status.innerHTML = scStatusText(d);
+  scFillSettings(d.auto);
   const st = d.stats || {}, p = st.plans || {}, lv = st.levels || {}, mn = st.manual || {};
   const kpis = `<div class="cards kpis">
       <div class="card"><div class="v">${esc(st.n_scored ?? 0)}</div><div class="l">scored briefs (last ${esc(d.config?.stats_n ?? 20)})</div></div>
@@ -645,7 +679,7 @@ async function loadScalp() {
       <td>${h.no_scalp_now ? `<span class="fail">NO SCALP</span>` : `${esc(h.n_plans)} plans${h.n_rejected ? ` <span class="muted">(${esc(h.n_rejected)} rejected)</span>` : ""}`} · ${esc(h.n_levels)} levels</td>
       <td>${h.score ? `${esc(h.score.triggered)} trig · ${esc(h.score.target_first)} tgt · ${esc(h.score.stop_first)} stop · <span class="${scCls(h.score.sum_r)}">${scR(h.score.sum_r)}</span> · lv ${esc(h.score.levels_held)}/${esc(h.score.levels_touched)}` : `<span class="muted">not scored</span>`}</td>
       <td>${esc(h.n_manual || "")}</td></tr>`);
-  const manual = (d.manual_trades || []).slice(0, 30).map((t) => `<tr><td>${tSafe(t.open_ms)}</td><td class="${t.side === "BUY" ? "buy" : "sell"}">${esc(t.side)}</td><td>${esc(t.entry)}</td><td>${t.open ? `<span class="muted">open</span>` : esc(t.exit ?? "—")}</td>
+  const manual = (d.manual_trades || []).slice(0, 30).map((t) => `<tr><td>${tSafe(t.open_ms)}${t.auto ? ` <span class="badge">auto</span>` : ""}</td><td class="${t.side === "BUY" ? "buy" : "sell"}">${esc(t.side)}</td><td>${esc(t.entry)}</td><td>${t.open ? `<span class="muted">open</span>` : esc(t.exit ?? "—")}</td>
       <td>${esc(t.volume ?? "—")}</td><td class="${scCls(t.pnl_usd)}">${t.open ? "—" : num(t.pnl_usd)}</td><td class="small">${esc(t.brief_id || "—")}${t.followed_plan ? ` <span class="pass">plan followed</span>` : ""}</td></tr>`);
   box.innerHTML = `${kpis}
     ${scBriefHTML(d.latest, d.stats)}
@@ -653,7 +687,10 @@ async function loadScalp() {
     ${scSafetyHTML(d)}
     <h2>Hit-rate by the model's confidence (code confidence)</h2>
     ${grid(["bucket", "plans", "triggered", "decided (n)", "target first"], buckets, "—")}
-    <h2>Your manual trades (last days, magic 0 on the pair)</h2>
+    <h2>Auto-trades (D-061: the brief's trade placed by the job)</h2>
+    ${grid(["time (UTC)", "event", "brief", "side / type", "entry", "stop / target", "lot", "why / ticket"], (d.auto?.log || []).map((e) => `<tr><td>${tSafe(e.ts || e.settled_ms || e.placed_ms)}</td><td><b>${esc(e.event)}</b>${e.reason ? ` <span class="small muted">${esc(e.reason)}</span>` : ""}</td><td class="small">${esc(e.brief_id || "—")}</td>
+      <td class="${e.side === "BUY" ? "buy" : e.side === "SELL" ? "sell" : ""}">${esc(e.side || "")} ${esc(e.order_type || "")}</td><td>${esc(e.entry ?? "—")}</td><td>${esc(e.stop ?? "—")} / ${esc(e.target ?? "—")}</td><td>${esc(e.lot ?? "—")}</td><td class="small">${esc(txt(e.why, 160))}${e.ticket ? ` · #${esc(e.ticket)}` : ""}</td></tr>`), "No auto-trade yet (mode analyze, or no plan passed the gates).")}
+    <h2>Your manual trades (last days, magic 0 on the pair; auto-trades marked)</h2>
     ${grid(["opened (UTC)", "side", "entry", "exit", "lots", "P&L $", "brief"], manual, "No manual trade read from the terminal yet (the job reads deals only while MT5 runs).")}
     <h2>Briefs (newest first - click one)</h2>
     ${grid(["time (UTC)", "reason", "regime / bias", "plans", "score", "manual"], hist, "No brief stored yet.")}`;
@@ -706,6 +743,7 @@ async function runScalp() {
   $("#rv-refresh").addEventListener("click", loadReviews);
   $("#sc-refresh").addEventListener("click", loadScalp);
   $("#sc-run").addEventListener("click", runScalp);
+  $("#sc-save").addEventListener("click", saveScalpSettings);
   $("#sc-body").addEventListener("click", (e) => {
     const tr = e.target.closest("tr[data-id]");
     if (tr) showScalp(tr.dataset.id);

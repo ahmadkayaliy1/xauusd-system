@@ -294,3 +294,33 @@ def test_the_page_has_the_scalp_tab(env):
     html = env.client.get("/").text
     assert 'data-tab="scalp"' in html and 'id="tab-scalp"' in html
     assert 'id="sc-run"' in html and 'id="sc-refresh"' in html and 'id="sc-body"' in html
+
+
+# ---------------------------------------------------------------------- D-061: POST /api/scalp/settings
+def test_settings_are_saved_through_the_guarded_route_and_shown_by_the_get(env, monkeypatch):
+    from tradingsystem.scalp import autotrade as at
+    sent = []
+    monkeypatch.setattr(app_mod, "_notify", lambda s, level, title, text, *, key=None, pair=None: sent.append((level, title, key)))
+    body = {"mode": "auto", "lot": 0.02, "min_confidence": 60}
+    assert env.client.post("/api/scalp/settings", json=body).status_code == 401
+    assert env.client.post("/api/scalp/settings", json=body, headers={"X-Dashboard-Token": "nope"}).status_code == 401
+    r = env.client.post("/api/scalp/settings", json=body, headers={"X-Dashboard-Token": TOKEN, "Origin": "http://evil.example"})
+    assert r.status_code == 403
+    r = env.client.post("/api/scalp/settings", json=body, headers={"X-Dashboard-Token": TOKEN, "Origin": env.origin})
+    assert r.status_code == 200 and r.json()["saved"] is True
+    assert r.json()["settings"]["mode"] == "auto" and r.json()["settings"]["lot"] == 0.02
+    assert at.read_settings(env.s)["min_confidence"] == 60 and sent[-1][1].startswith("Scalp settings: mode auto, lot 0.02")
+    d = env.client.get("/api/scalp").json()
+    assert d["auto"]["settings"]["mode"] == "auto" and d["auto"]["open"] == [] and d["auto"]["log"] == []
+    assert d["auto"]["magic"] == at.scalp_magic(env.s) and d["auto"]["max_lot"] == 0.10 and d["auto"]["risk_cap_pct"] == 5.0
+    # a value out of bounds: 400 with the reason, nothing changed
+    r = env.client.post("/api/scalp/settings", json={"lot": 0.5}, headers={"X-Dashboard-Token": TOKEN, "Origin": env.origin})
+    assert r.status_code == 400 and "lot must be between" in r.json()["detail"]
+    assert at.read_settings(env.s)["lot"] == 0.02
+    r = env.client.post("/api/scalp/settings", json={"mode": "analyze"}, headers={"X-Dashboard-Token": TOKEN, "Origin": env.origin})
+    assert r.status_code == 200 and r.json()["settings"] == {**r.json()["settings"], "mode": "analyze", "lot": 0.02, "min_confidence": 60}
+    r = env.client.post("/api/scalp/settings", content=b"not json", headers={"X-Dashboard-Token": TOKEN, "Origin": env.origin,
+                                                                           "Content-Type": "application/json"})
+    assert r.status_code == 400
+    html = env.client.get("/").text
+    assert 'id="sc-mode"' in html and 'id="sc-lot"' in html and 'id="sc-minconf"' in html and 'id="sc-save"' in html

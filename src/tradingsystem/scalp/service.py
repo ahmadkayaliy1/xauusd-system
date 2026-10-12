@@ -41,6 +41,7 @@ EXIT_OK, EXIT_FAILED, EXIT_SKIPPED = 0, 1, 2
 ENGINE_FRESH_S = 60.0              # an engine row older than this = no desk call can be in flight
 GATE_POLL_S = 30.0                 # a ``wait`` gate is looked at again this often
 LOOP_POLL_S = 15.0                 # the loop reads STOP this often
+MANAGE_EVERY_MS = 60_000           # D-061: the loop looks after the auto-trades this often
 STATUS_EVERY_MS = 60_000           # the loop rewrites status.json this often while idle
 OPERATOR_LOCK = "operator_session.lock"
 REASONS = ("hourly", "dashboard", "manual")
@@ -248,7 +249,7 @@ def manual_text(trades: list[dict], n: int = 5) -> str:
     out = []
     for t in sorted(trades, key=lambda x: x.get("open_ms") or 0, reverse=True)[:n]:
         when = dt.datetime.fromtimestamp((t.get("open_ms") or 0) / 1000, dt.timezone.utc).strftime("%m-%d %H:%M")
-        line = f"{when} {t.get('side')} {t.get('entry')}"
+        line = f"{when} {t.get('side')} {t.get('entry')}" + (" (auto)" if t.get("auto") else "")
         line += f" -> {t.get('exit')}" if t.get("exit") is not None else " (open)"
         if isinstance(t.get("pnl_usd"), (int, float)):
             line += f" {t['pnl_usd']:+.2f} USD"
@@ -316,6 +317,17 @@ def _run_body(s: Settings, reg: InstrumentRegistry, exe, usage, *, reason: str, 
         key = f"scalp:{rec['id']}" + ("" if reason == "hourly" else ":manual")
         notify(s, cfg.notify_level, title, text, key=key, pair=pair)
         flush(15.0)
+    try:                                               # D-061: THE trade placed when the owner switched auto on
+        pcfg = s.pairs[pair]
+        cal = calendar_for(exe.venue, exe.symbol, pcfg.asset_class)
+        ex = _mod("autotrade").execute(s, rec, symbol=exe.symbol, equity=desk.get("equity"),
+                                       market_open=cal.is_open(as_of), now=as_of)
+        rec["execution"] = ex
+        write_record(s, rec, None)
+        if cfg.notify:
+            flush(15.0)
+    except Exception:  # noqa: BLE001 - the brief stands; the order is the smaller thing
+        log.exception("scalp: auto execution failed (the brief is stored)")
     update_status(s, last_run_ms=now_ms(), last_outcome="ok", last_error=None, last_id=rec["id"])
     return EXIT_OK
 
@@ -377,7 +389,8 @@ def _refresh_manual(s: Settings, exe, records: list[dict], now: int) -> list[dic
         return _stored_manual(s)
     model = ServerTimeModel()
     trades = sc.manual_trades(deals, symbol=exe.symbol, t0=t0, t1=now,
-                              server_to_utc=lambda ms: model.server_to_utc(ms, prefer="earlier"))
+                              server_to_utc=lambda ms: model.server_to_utc(ms, prefer="earlier"),
+                              auto_magic=_mod("autotrade").scalp_magic(s))
     tol = next((float(r["tol"]) for r in records if isinstance(r.get("tol"), (int, float))), 1.0)
     sc.attribute(trades, records, tol)
     trades.sort(key=lambda t: t.get("open_ms") or 0, reverse=True)
@@ -433,9 +446,17 @@ def spawn_once(s: Settings, *, timeout_s: int, python: str | None = None) -> int
         return None
 
 
+def _manage_tick(s: Settings) -> None:
+    """D-061: the auto-trades' minute tick (nothing happens while nothing is tracked - no MT5 attach)."""
+    try:
+        _mod("autotrade").manage(s)
+    except Exception:  # noqa: BLE001 - never the loop's end
+        log.exception("scalp: the auto-trade tick failed")
+
+
 def loop(s: Settings, *, clock: Callable[[], int] = now_ms, sleep: Callable[[float], None] = time.sleep,
          spawn: Callable[[], Any] | None = None, market_open: Callable[[int], bool] | None = None,
-         poll_s: float = LOOP_POLL_S) -> int:
+         poll_s: float = LOOP_POLL_S, manage: Callable[[], Any] | None = None) -> int:
     """The tiny scheduler: at every slot of ``hours_utc`` (+ ``run_offset_s``) one ``--once`` child, ``status.json``
     every minute, the end when ``STOP`` appears. Never two loops (``loop.lock``). A slot while the market is closed
     (the weekend) starts nothing."""
@@ -453,6 +474,8 @@ def loop(s: Settings, *, clock: Callable[[], int] = now_ms, sleep: Callable[[flo
     # the child may wait up to gate_retry_min for the desk's call / free RAM BEFORE its run: the kill timeout covers
     # both (2026-10-12: a 600 s timeout killed every hourly run while it was still politely waiting on low RAM)
     run = spawn or (lambda: spawn_once(s, timeout_s=child_timeout_s(cfg)))
+    tick = manage or (lambda: _manage_tick(s))
+    managed = 0
     try:
         started = clock()
         nxt = next_slot(started, cfg)
@@ -474,6 +497,9 @@ def loop(s: Settings, *, clock: Callable[[], int] = now_ms, sleep: Callable[[flo
             elif t - written >= STATUS_EVERY_MS:
                 written = t
                 update_status(s, pid=os.getpid(), next_run_ms=nxt)
+            if t - managed >= MANAGE_EVERY_MS:              # D-061: the open scalp order / position
+                managed = t
+                tick()
             sleep(max(0.0, min(poll_s, (nxt - clock()) / 1000)))
         log.info("scalp loop: STOP found - the loop ends")
         update_status(s, pid=None, next_run_ms=None)

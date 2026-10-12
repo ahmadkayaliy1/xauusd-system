@@ -609,6 +609,31 @@ def create_app(s: Settings) -> FastAPI:
                 "(status.json says what it did); the brief arrives on this tab within ~2 minutes")
         return JSONResponse({"started": True, "pid": pid, "note": note})
 
+    @app.post("/api/scalp/settings")
+    async def scalp_settings(request: Request, x_dashboard_token: str | None = Header(default=None)) -> JSONResponse:
+        """D-061: the owner's mode (analyze | auto), lot and confidence floor -> ``data/scalp/settings.json`` (the
+        next brief reads it; no restart). Token + Origin like the kill switch; 400 with the reason when a value is
+        out of bounds (``scalp.auto_max_lot``)."""
+        guard(request, x_dashboard_token)
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "a JSON body {mode, lot, min_confidence} is needed") from None
+        if not isinstance(body, dict):
+            raise HTTPException(400, "a JSON object is needed")
+        from ..scalp import autotrade
+        cur = autotrade.read_settings(s)
+        try:
+            doc = autotrade.write_settings(s, mode=body.get("mode", cur["mode"]), lot=body.get("lot", cur["lot"]),
+                                           min_confidence=body.get("min_confidence", cur["min_confidence"]))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        log.info("scalp settings changed from the dashboard: %s", doc)
+        _notify(s, "info", f"Scalp settings: mode {doc['mode']}, lot {doc['lot']:g}, min confidence {doc['min_confidence']}",
+                "from the dashboard" + (" - AUTO EXECUTION ON: the next brief's trade is placed" if doc["mode"] == "auto"
+                                        else " - analysis only"), key="scalp:settings")
+        return JSONResponse({"saved": True, "settings": doc})
+
     @app.get("/api/scalp/{brief_id}")
     def scalp_record(brief_id: str) -> dict:
         """One stored brief: the record and its markdown. Only an id that matches the pattern and is in the
@@ -648,7 +673,12 @@ def create_app(s: Settings) -> FastAPI:
         status = scalp_json("status.json")
         manual = scalp_json("manual_trades.json")
         rm = s.ai.models.scalp
-        return _plain({"enabled": s.scalp.enabled,
+        from ..scalp import autotrade
+        auto = {"settings": autotrade.read_settings(s), "open": autotrade.read_state(s)["open"],
+                "log": autotrade.read_log(s, 30), "magic": autotrade.scalp_magic(s),
+                "max_lot": s.scalp.auto_max_lot, "risk_cap_pct": s.scalp.auto_risk_cap_pct,
+                "contract_size": s.scalp.contract_size, "execution_mode": s.execution.mode}
+        return _plain({"enabled": s.scalp.enabled, "auto": auto,
                        "config": {"pair": s.scalp.pair, "hours_utc": list(s.scalp.hours_utc),
                                   "max_per_day": s.scalp.max_per_day, "model": rm.model, "effort": rm.effort,
                                   "charts": list(s.scalp.charts), "stats_n": s.scalp.stats_n,

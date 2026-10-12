@@ -45,16 +45,17 @@ def test_tab_button_and_section():
     section = HTML.split('<section id="tab-scalp"', 1)[1].split("</section>", 1)[0]
     for el in ('id="sc-refresh"', 'id="sc-run"', 'id="sc-status"', 'id="sc-body"', 'id="sc-detail"'):
         assert el in section, el
-    assert ">Run now…</button>" in section and "never places an order" in section
+    assert ">Run now…</button>" in section and 'id="sc-mode"' in section and 'id="sc-save"' in section   # D-061
 
 
 def test_functions_defined_hooked_and_bound():
-    for fn in ("loadScalp", "showScalp", "runScalp"):
+    for fn in ("loadScalp", "showScalp", "runScalp", "saveScalpSettings"):
         assert re.search(rf"^async function {fn}\(", JS, re.M), fn
     assert 'if (b.dataset.tab === "scalp") loadScalp();' in JS
     boot = JS.split("(async function boot()", 1)[1]
     assert '$("#sc-refresh").addEventListener("click", loadScalp);' in boot
     assert '$("#sc-run").addEventListener("click", runScalp);' in boot
+    assert '$("#sc-save").addEventListener("click", saveScalpSettings);' in boot
     assert 'tr[data-id]' in boot and "showScalp(tr.dataset.id)" in boot        # one delegated listener on #sc-body
 
 

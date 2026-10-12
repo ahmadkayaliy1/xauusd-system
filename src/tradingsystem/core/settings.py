@@ -837,9 +837,19 @@ class ScalpCfg(_Model):
     notify: bool = True
     notify_level: Literal["info", "warn"] = "info"
     manual_risk_cap_pct: float = Field(5.0, gt=0, le=15)   # the recommendation shown on the page (never enforced)
+    # D-061: auto execution of THE trade (the owner switches it on the Scalp tab; data/scalp/settings.json holds the
+    # mode, the lot and the confidence floor; these are the bounds and the account-side facts)
+    auto_magic_offset: int = Field(9, ge=4, le=99)      # the scalp trades' magic = the project's base magic + this
+    auto_default_lot: float = Field(0.01, ge=0.01, le=10)
+    auto_max_lot: float = Field(0.10, ge=0.01, le=10)     # the dashboard refuses a bigger lot
+    auto_min_confidence: int = Field(55, ge=0, le=100)   # the default floor: a plan under it is not placed
+    auto_risk_cap_pct: float = Field(5.0, gt=0, le=15)    # |entry - stop| x lot x contract <= this % of equity, else no order
+    contract_size: float = Field(100.0, gt=0)             # XAUUSD: 100 oz per lot (the prompt's risk arithmetic)
 
     @model_validator(mode="after")
     def _check(self) -> "ScalpCfg":
+        if self.auto_default_lot > self.auto_max_lot:
+            raise ValueError("scalp.auto_default_lot must not exceed scalp.auto_max_lot")
         h = self.hours_utc
         if len(h) != 2 or not 0 <= h[0] < h[1] <= 24:
             raise ValueError("scalp.hours_utc must be [start, end) with 0 <= start < end <= 24")

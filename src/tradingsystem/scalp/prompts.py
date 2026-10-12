@@ -17,7 +17,7 @@ _HEADER = re.compile(r"^<!-- prompt: .*? -->\s*", re.M)
 _VERSION = re.compile(r"^<!-- prompt: (\S+) · version (\d+) -->", re.M)
 SYSTEM_VARS = ("pair", "price_reference", "output_language", "min_stop_rule", "min_rr", "spread_mult", "max_plans",
                "news_windows", "hours_text")
-USER_VARS = ("now_utc", "reason", "desk", "manual_recent", "journal", "charts_note", "payload")
+USER_VARS = ("now_utc", "reason", "desk", "manual_recent", "journal", "charts_note", "payload", "execution")
 
 
 def _read(name: str) -> tuple[str, str, int | None]:

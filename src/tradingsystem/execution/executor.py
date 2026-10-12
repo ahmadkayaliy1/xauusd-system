@@ -145,6 +145,7 @@ class Executor:
             term = MT5Terminal(prof)
             self._connect_mt5(term)
             own, base, family = magics(s)
+            family = family | {base + s.scalp.auto_magic_offset}   # D-061: the scalp auto-trades count in the caps
             self.mt5 = MT5Backend(term, own, expected_account_type=prof.account_type,
                                   pair_by_symbol={**all_pairs_by_symbol(s, pname), **self.pair_by_symbol()},
                                   own_pairs=set(s.enabled_pairs()),

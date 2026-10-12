@@ -47,6 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--start-loop", action="store_true", help="start the loop hidden and detached (once)")
     mode.add_argument("--score-only", action="store_true", help="score the stored briefs, no model call")
     mode.add_argument("--status", action="store_true", help="print status.json and the loop state")
+    mode.add_argument("--manage", action="store_true", help="one auto-trade tick (D-061): hold times, settlements")
+    mode.add_argument("--settings", action="store_true", help="print the owner's auto-trade settings and state (D-061)")
     ap.add_argument("--quiet", action="store_true", help="no console log (the loop and its children)")
     ap.add_argument("--reason", choices=("hourly", "dashboard", "manual"), default="manual")
     ap.add_argument("--no-model", action="store_true", help="take the brief from --fixture: no CLI call, no ledger row")
@@ -69,6 +71,14 @@ def main(argv: list[str] | None = None) -> int:
             return service.EXIT_OK
         if a.loop:
             return service.loop(s)
+        if a.manage or a.settings:
+            from tradingsystem.scalp import autotrade
+            if a.manage:
+                print(json.dumps(autotrade.manage(s), indent=1, ensure_ascii=False, default=str))
+            else:
+                print(json.dumps({"settings": autotrade.read_settings(s), "state": autotrade.read_state(s),
+                                  "magic": autotrade.scalp_magic(s)}, indent=1, ensure_ascii=False, default=str))
+            return service.EXIT_OK
         if a.score_only:
             return service.score_only(s)
         code = service.run_once(s, reason=a.reason, no_model=a.no_model, fixture=a.fixture)

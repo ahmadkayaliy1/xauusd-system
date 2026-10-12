@@ -198,12 +198,16 @@ def desk_text(desk: dict) -> str:
 
 
 def compose(s: Settings, reg: InstrumentRegistry, inputs: Inputs, *, reason: str, desk: dict, manual_text: str,
-            journal_text: str) -> tuple[str, str, dict[str, int]]:
-    """``(system, user, versions)`` of this run."""
+              journal_text: str, execution: str | None = None) -> tuple[str, str, dict[str, int]]:
+    """``(system, user, versions)`` of this run. ``execution`` = the owner's lot / auto line (D-061,
+    ``autotrade.execution_text``); None = computed here from the stored settings."""
+    if execution is None:
+        from .autotrade import execution_text, read_settings
+        execution = execution_text(s, read_settings(s), desk.get("equity"))
     user = {"now_utc": iso(inputs.as_of), "reason": reason, "desk": desk_text(desk),
             "manual_recent": manual_text or "none in the last days",
             "journal": journal_text or "no scored brief yet - calibrate from the rules above",
-            "charts_note": inputs.charts_note, "payload": inputs.payload_text}
+            "charts_note": inputs.charts_note, "payload": inputs.payload_text, "execution": execution}
     return render_scalp(system_vars(s, reg, inputs.pair), user)
 
 

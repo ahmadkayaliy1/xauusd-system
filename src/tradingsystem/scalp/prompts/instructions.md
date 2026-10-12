@@ -1,8 +1,11 @@
-<!-- prompt: scalp/instructions · version 2 -->
+<!-- prompt: scalp/instructions · version 3 -->
 Time now: $now_utc. Reason: $reason (hourly = the scheduled brief at the top of the hour; dashboard = the owner asked for one now; manual = a run by hand).
 
 ## The desk (the automatic trader on the same account)
 $desk
+
+## The owner's lot and the execution of your trade
+$execution
 
 ## The owner's recent manual trades
 $manual_recent

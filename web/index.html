@@ -104,7 +104,14 @@
         <button id="sc-refresh" class="primary">Refresh</button>
         <button id="sc-run" class="primary" title="Ask the model for a brief now (one call on the scalp budget; the run applies its own gates: enabled, market, daily cap, the desk's call, free RAM)">Run now…</button>
         <span id="sc-status" class="small muted">—</span>
-        <span class="small muted">The hourly manual-scalping brief (D-058): the model's picture, levels and conditional plans for the coming hour, scored by the code on the real ticks. It never places an order; the desk does not see manual trades.</span>
+        <span class="small muted">The hourly manual-scalping brief (D-058): the model's picture, levels and conditional plans for the coming hour, scored by the code on the real ticks. The desk does not see manual trades.</span>
+      </div>
+      <div class="toolbar" id="sc-settings" title="D-061: analyze = the brief only, you trade by hand; auto = THE trade of each brief is placed as a pending order with this lot (one at a time, confidence floor, risk cap, demo only)">
+        <label class="small">Execution <select id="sc-mode"><option value="analyze">analyze only (I trade by hand)</option><option value="auto">AUTO: place the brief's trade</option></select></label>
+        <label class="small">Lot <input id="sc-lot" type="number" step="0.01" min="0.01" max="0.10" value="0.01" style="width:5em"></label>
+        <label class="small">Min confidence <input id="sc-minconf" type="number" step="1" min="0" max="100" value="55" style="width:4em"></label>
+        <button id="sc-save" class="primary">Save</button>
+        <span id="sc-auto-state" class="small muted">—</span>
       </div>
       <div id="sc-body"><p class="muted small">Loading…</p></div>
       <div id="sc-detail" class="detail hidden"></div>
