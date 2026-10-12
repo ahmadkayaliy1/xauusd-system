@@ -41,13 +41,24 @@ def record(**over) -> dict:
 class FakeBackend:
     """The slice of MT5Backend the auto-trader uses; records every call."""
 
-    def __init__(self, *, ok=True, orders=(), positions=(), close_ok=True):
+    def __init__(self, *, ok=True, orders=(), positions=(), close_ok=True, bid=4183.0, ask=4183.22):
         self.calls: list[tuple] = []
         self.ok, self.close_ok = ok, close_ok
         self.orders, self.positions = list(orders), list(positions)
-        self.mt5 = NS(orders_get=lambda: list(self.orders), positions_get=lambda: list(self.positions))
+        self.quote = NS(bid=bid, ask=ask, time_msc=T)
+        self.mt5 = NS(orders_get=lambda: list(self.orders), positions_get=lambda: list(self.positions),
+                      symbol_info_tick=lambda symbol: self.quote)
         self.model = NS(server_to_utc=lambda ms, prefer="earlier": int(ms) - 3 * 3_600_000)
         self.magic = 26092510
+
+    def cancel_order(self, ticket, **kw):
+        self.calls.append(("cancel", ticket))
+        self.orders = [o for o in self.orders if o.ticket != ticket]
+        return {"ok": True, "status": "applied", "retcode": 10009, "meaning": "done"}
+
+    def modify_sl(self, ticket, symbol, sl, tp=None, **kw):
+        self.calls.append(("modify_sl", ticket, sl, tp))
+        return {"ok": True, "status": "applied", "retcode": 10009, "meaning": "done"}
 
     def mine(self, x) -> bool:
         return int(getattr(x, "magic", 0)) == self.magic
@@ -184,12 +195,29 @@ def test_execute_places_the_trade_records_the_state_and_notifies(tmp_path, monke
     assert [e["event"] for e in at.read_log(s)] == ["placed"]
     assert sent[-1][0] == "info" and sent[-1][1] == "Scalp AUTO: SELL_LIMIT 0.02 @ 4186.0 placed"
     assert "SL 4189.0 / TP 4180.0 · risk 6.00 USD" in sent[-1][2] and sent[-1][3] == "scalp:auto:20261013T1000Z:placed"
-    # one at a time: the next brief is refused while this one is tracked (no attach)
+    # D-063: the next brief finds the order still pending at the broker -> it is cancelled and the new trade placed
+    be.orders = [NS(ticket=555, magic=26092510, comment="ts:sc20261013T1000Z:1", price_open=4186.0, sl=4189.0, tp=4180.0,
+                    volume_current=0.02, type=3)]
     seen.clear()
     ex2 = at.execute(s, {**rec, "id": "20261013T1100Z", "as_of_ms": T + 3_600_000}, symbol="XAUUSD@", equity=500.0,
                      market_open=True, now=T + 3_600_000, attach_fn=attach)
-    assert ex2["decision"] == "skipped" and "still open" in ex2["why"] and not seen
-    assert [e["event"] for e in at.read_log(s)][0] == "refused" and sent[-1][1] == "Scalp AUTO: no order"
+    assert ex2["decision"] == "placed" and [m["event"] for m in ex2["managed"]] == ["replaced"]
+    assert [c[0] for c in be.calls] == ["place", "cancel", "place"] and be.calls[1][1] == 555
+    assert [e["brief_id"] for e in at.read_state(s)["open"]] == ["20261013T1100Z"]
+    assert [e["event"] for e in at.read_log(s)][:2] == ["placed", "replaced"]
+    assert any(t == "Scalp AUTO: pending SELL @ 4186.0 replaced" for _, t, _, _ in sent)
+    # a position the brief says to HOLD blocks the next trade (one at a time)
+    pos = NS(ticket=556, magic=26092510, comment="ts:sc20261013T1100Z:1", price_open=4186.0, sl=4189.0, tp=4180.0,
+             volume=0.02, profit=-1.1, swap=0.0, type=1, time_msc=T + 3_600_000 + 3 * 3_600_000)
+    be.orders, be.positions = [], [pos]
+    at.write_state(s, {"open": [{**at.read_state(s)["open"][0], "ticket": 556}]}, T)
+    ex3 = at.execute(s, {**record(manage_open="hold", manage_reason="الهيكل لسا هابط"), "id": "20261013T1200Z",
+                         "as_of_ms": T + 7_200_000}, symbol="XAUUSD@", equity=500.0, market_open=True,
+                     now=T + 7_200_000, attach_fn=attach)
+    assert ex3["decision"] == "skipped" and "still open" in ex3["why"]
+    assert [m["event"] for m in ex3["managed"]] == ["managed_hold"] and ex3["managed"][0]["why"] == "الهيكل لسا هابط"
+    assert be.calls[-1][0] == "place" and len([c for c in be.calls if c[0] == "place"]) == 2   # nothing new placed
+    assert at.read_state(s)["open"][0]["stage"] == "position" and sent[-1][1].startswith("Scalp AUTO: no order")
 
 
 def test_execute_failures_are_recorded_and_never_raise(tmp_path, monkeypatch):
@@ -203,7 +231,7 @@ def test_execute_failures_are_recorded_and_never_raise(tmp_path, monkeypatch):
         raise RuntimeError("MT5 terminal is not running")
     ex = at.execute(s, rec, symbol="XAUUSD@", equity=500.0, market_open=True, now=T, attach_fn=no_terminal)
     assert ex["decision"] == "failed" and ex["why"].startswith("MT5: RuntimeError") and at.read_state(s)["open"] == []
-    assert sent[-1][:2] == ("warn", "Scalp AUTO: order NOT placed")
+    assert sent[-1][:2] == ("warn", "Scalp AUTO: nothing done")
     # the broker refuses
     be = FakeBackend(ok=False)
     attach, term, _ = fake_attach(be)
@@ -313,3 +341,101 @@ def test_hours_and_cadence_are_owner_settings_with_partial_updates(tmp_path):
     assert at.schedule(s) == ([9, 18], 30)
     (scalp_dir(s) / at.SETTINGS_FILE).write_text('{"mode": "auto", "lot": 0.01, "min_confidence": 50}', encoding="utf-8")
     assert at.read_settings(s)["hours_utc"] == [7, 16] and at.read_settings(s)["every_min"] == 60   # older file: defaults
+
+
+# ------------------------------------------------------------------------------------------- D-063: the brief manages
+def position(**over):
+    base = dict(ticket=555, magic=26092510, comment="ts:sc20261013T1000Z:1", price_open=4186.0, sl=4189.0, tp=4180.0,
+                volume=0.02, profit=3.4, swap=0.0, type=1, time_msc=T + 10 * MIN + 3 * 3_600_000)
+    return NS(**{**base, **over})
+
+
+def tracked(**over) -> dict:
+    return {"ticket": 555, "brief_id": "20261013T1000Z", "idx": 0, "side": "SELL", "symbol": "XAUUSD@", "entry": 4186.0,
+            "stop": 4189.0, "target": 4180.0, "lot": 0.02, "placed_ms": T, "expires_ms": T + 60 * MIN, "max_hold_min": 45,
+            "stage": "pending", "filled_ms": None, **over}
+
+
+def test_open_snapshot_describes_the_position_the_pending_order_or_nothing(tmp_path):
+    s = settings(tmp_path)
+    assert at.open_snapshot(s, "XAUUSD@", now=T) is None                        # nothing tracked: no attach
+    at.write_state(s, {"open": [tracked()]}, T)
+    be = FakeBackend(positions=[position()], bid=4183.0, ask=4183.22)             # a SELL from 4186: in profit
+    attach, term, _ = fake_attach(be)
+    o = at.open_snapshot(s, "XAUUSD@", now=T + 30 * MIN, attach_fn=attach)
+    assert o["kind"] == "position" and o["side"] == "SELL" and o["entry"] == 4186.0 and o["profit_usd"] == 3.4
+    assert o["held_min"] == 20 and o["max_hold_min"] == 45 and o["in_profit"] is True and o["price"] == 4183.22
+    assert term.down == 1
+    text = at.open_trade_text(o)
+    assert "YOUR OPEN TRADE (from brief 20261013T1000Z): SELL 0.02 lots filled at 4186.0" in text
+    assert "+3.40 USD" in text and "IN PROFIT" in text and "Decide manage_open" in text
+    be2 = FakeBackend(orders=[NS(ticket=555, magic=26092510, comment="ts:sc20261013T1000Z:1", price_open=4186.0, sl=4189.0,
+                                 tp=4180.0, volume_current=0.02, type=3)])
+    attach2, _, _ = fake_attach(be2)
+    o = at.open_snapshot(s, "XAUUSD@", now=T + 30 * MIN, attach_fn=attach2)
+    assert o["kind"] == "pending" and o["entry"] == 4186.0 and "cancelled now and replaced" in at.open_trade_text(o)
+    attach3, _, _ = fake_attach(FakeBackend())
+    assert at.open_snapshot(s, "XAUUSD@", now=T + 30 * MIN, attach_fn=attach3) == {"kind": None}
+    assert at.open_trade_text(None).endswith("none (set manage_open to none).")
+    line = at.execution_text(s, {"mode": "auto", "lot": 0.02, "min_confidence": 55}, 500.0, o)
+    assert "EXECUTION IS AUTOMATIC" in line and "YOUR PENDING ORDER" in line
+
+
+def test_the_brief_closes_its_position_and_may_place_the_new_trade(tmp_path, monkeypatch):
+    s = settings(tmp_path)
+    sent = []
+    monkeypatch.setattr(at, "notify", lambda s_, level, title, text, *, key=None, pair=None: sent.append((level, title, text)))
+    at.write_settings(s, mode="auto", lot=0.02, min_confidence=50, now=T)
+    at.write_state(s, {"open": [tracked(stage="position", filled_ms=T + 10 * MIN)]}, T)
+    be = FakeBackend(positions=[position()])
+    attach, term, _ = fake_attach(be)
+    rec = {**record(manage_open="close", manage_reason="انكسر الهيكل لفوق"), "id": "20261013T1100Z", "as_of_ms": T + 60 * MIN}
+    ex = at.execute(s, rec, symbol="XAUUSD@", equity=500.0, market_open=True, now=T + 60 * MIN, attach_fn=attach)
+    assert [m["event"] for m in ex["managed"]] == ["managed_close"] and ex["managed"][0]["why"] == "انكسر الهيكل لفوق"
+    assert ex["decision"] == "placed" and [c[0] for c in be.calls] == ["close", "place"] and term.down == 1
+    assert [e["brief_id"] for e in at.read_state(s)["open"]] == ["20261013T1100Z"]
+    assert sent[0][1] == "Scalp AUTO: SELL closed by the brief (+3.40 USD)" and sent[-1][1].startswith("Scalp AUTO: SELL_LIMIT")
+    assert [e["event"] for e in at.read_log(s)][:2] == ["placed", "managed_close"]
+
+
+def test_breakeven_only_when_in_profit_and_only_once(tmp_path, monkeypatch):
+    s = settings(tmp_path)
+    sent = []
+    monkeypatch.setattr(at, "notify", lambda s_, level, title, text, *, key=None, pair=None: sent.append((level, title, text)))
+    at.write_settings(s, mode="auto", lot=0.02, min_confidence=50, now=T)
+    at.write_state(s, {"open": [tracked(stage="position", filled_ms=T + 10 * MIN)]}, T)
+    rec = {**record(manage_open="breakeven", manage_reason="بربح والهيكل ماشي"), "id": "20261013T1100Z", "as_of_ms": T + 60 * MIN}
+    # not in profit beyond the spread: refused, the position is held, no new trade (one at a time)
+    be = FakeBackend(positions=[position(profit=-0.5)], bid=4186.1, ask=4186.3)
+    attach, _, _ = fake_attach(be)
+    ex = at.execute(s, rec, symbol="XAUUSD@", equity=500.0, market_open=True, now=T + 60 * MIN, attach_fn=attach)
+    assert ex["managed"][0]["event"] == "managed_hold" and "breakeven refused: not in profit" in ex["managed"][0]["why"]
+    assert ex["decision"] == "skipped" and be.calls == [] and at.read_state(s)["open"][0].get("breakeven_ms") is None
+    assert sent[0][1] == "Scalp AUTO: holding SELL (-0.50 USD)"
+    # in profit: the stop goes to the entry (the target kept), remembered so it is not sent again
+    be = FakeBackend(positions=[position()], bid=4183.0, ask=4183.22)
+    attach, _, _ = fake_attach(be)
+    ex = at.execute(s, rec, symbol="XAUUSD@", equity=500.0, market_open=True, now=T + 61 * MIN, attach_fn=attach)
+    assert ex["managed"][0]["event"] == "managed_breakeven" and be.calls == [("modify_sl", 555, 4186.0, 4180.0)]
+    assert at.read_state(s)["open"][0]["breakeven_ms"] == T + 61 * MIN and at.read_state(s)["open"][0]["stop"] == 4186.0
+    assert sent[-2][1] == "Scalp AUTO: SELL stop to breakeven" and ex["decision"] == "skipped"
+    ex = at.execute(s, {**rec, "id": "20261013T1200Z"}, symbol="XAUUSD@", equity=500.0, market_open=True,
+                    now=T + 62 * MIN, attach_fn=attach)
+    assert ex["managed"][0]["event"] == "managed_hold" and "already done" in ex["managed"][0]["why"]
+    assert be.calls == [("modify_sl", 555, 4186.0, 4180.0)]
+
+
+def test_a_brief_without_a_trade_just_cancels_a_stale_pending_order(tmp_path, monkeypatch):
+    s = settings(tmp_path)
+    sent = []
+    monkeypatch.setattr(at, "notify", lambda s_, level, title, text, *, key=None, pair=None: sent.append((level, title, text)))
+    at.write_settings(s, mode="auto", lot=0.02, min_confidence=50, now=T)
+    at.write_state(s, {"open": [tracked()]}, T)
+    be = FakeBackend(orders=[NS(ticket=555, magic=26092510, comment="ts:sc20261013T1000Z:1", price_open=4186.0, sl=4189.0,
+                                tp=4180.0, volume_current=0.02, type=3)])
+    attach, term, _ = fake_attach(be)
+    rec = {**record(plans=[], no_scalp_now=True, best_plan=None, trade_call=""), "id": "20261013T1100Z", "as_of_ms": T + 60 * MIN}
+    ex = at.execute(s, rec, symbol="XAUUSD@", equity=500.0, market_open=True, now=T + 60 * MIN, attach_fn=attach)
+    assert [m["event"] for m in ex["managed"]] == ["cancelled"] and be.calls == [("cancel", 555)]
+    assert ex["decision"] == "skipped" and ex["why"].startswith("no plan chosen") and at.read_state(s)["open"] == []
+    assert sent[0][1] == "Scalp AUTO: pending SELL @ 4186.0 cancelled" and term.down == 1

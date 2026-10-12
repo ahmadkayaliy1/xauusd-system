@@ -123,20 +123,40 @@ def schedule(s: Settings) -> tuple[list[int], int]:
     return [int(st["hours_utc"][0]), int(st["hours_utc"][1])], int(st["every_min"])
 
 
-def execution_text(s: Settings, settings: dict, equity: float | None) -> str:
-    """The line the user prompt carries: the fixed lot, the risk cap in USD, and whether the trade is placed."""
+def execution_text(s: Settings, settings: dict, equity: float | None, open_info: dict | None = None) -> str:
+    """The line the user prompt carries: the fixed lot, the risk cap in USD, whether the trade is placed, and
+    (D-063) the previous brief's auto-trade still open."""
     lot, oz = float(settings["lot"]), float(settings["lot"]) * float(s.scalp.contract_size)
     cap = (f"{equity * s.scalp.auto_risk_cap_pct / 100:.2f} USD ({s.scalp.auto_risk_cap_pct:g} % of equity {equity:.2f})"
            if isinstance(equity, (int, float)) and equity > 0 else f"{s.scalp.auto_risk_cap_pct:g} % of the equity")
     head = (f"The owner's lot is FIXED at {lot:g} lots = {oz:g} oz: a plan's risk in USD = |entry - stop| x {oz:g}. "
             f"Keep every plan's risk at or under {cap}.")
     if settings.get("mode") == "auto":
-        return (head + f" EXECUTION IS AUTOMATIC: the plan `best_plan` is placed as a pending order at its `entry` with "
-                f"its stop and target, {lot:g} lots, expiring {s.scalp.trigger_window_min} min after this brief, and the "
-                f"position is closed after its `max_hold_min`. Only `limit` and `stop` entries can be automated "
-                f"(a `market_after_rejection` plan stays a plan for the owner's hand); a plan under confidence "
-                f"{int(settings['min_confidence'])} is not placed.")
+        head += (f" EXECUTION IS AUTOMATIC: the plan `best_plan` is placed as a pending order at its `entry` with "
+                 f"its stop and target, {lot:g} lots, expiring {s.scalp.trigger_window_min} min after this brief, and the "
+                 f"position is closed after its `max_hold_min`. Only `limit` and `stop` entries can be automated "
+                 f"(a `market_after_rejection` plan stays a plan for the owner's hand); a plan under confidence "
+                 f"{int(settings['min_confidence'])} is not placed.")
+        return head + open_trade_text(open_info)
     return head + " Execution is BY HAND: the owner reads the brief and places the order himself."
+
+
+def open_trade_text(open_info: dict | None) -> str:
+    """D-063: the previous brief's auto-trade as the model reads it (nothing: an explicit sentence)."""
+    if not open_info or not open_info.get("kind"):
+        return " YOUR OPEN TRADE: none (set manage_open to none)."
+    o = open_info
+    if o["kind"] == "position":
+        pnl = o.get("profit_usd")
+        pnl_s = f"{pnl:+.2f} USD" if isinstance(pnl, (int, float)) else "unknown"
+        return (f" YOUR OPEN TRADE (from brief {o.get('brief_id')}): {o.get('side')} {o.get('lot'):g} lots filled at "
+                f"{o.get('entry')}, stop {o.get('sl')}, target {o.get('tp')}, now {pnl_s} at price {o.get('price')}, held "
+                f"{o.get('held_min', 0):.0f} of {o.get('max_hold_min')} min"
+                + (" - IN PROFIT beyond the spread" if o.get("in_profit") else " - not in profit")
+                + ". Decide manage_open: hold / close / breakeven, with manage_reason.")
+    return (f" YOUR PENDING ORDER (from brief {o.get('brief_id')}, not triggered): {o.get('side')} {o.get('order_type')} "
+            f"{o.get('lot'):g} lots at {o.get('entry')}, stop {o.get('sl')}, target {o.get('tp')} - it is cancelled now "
+            f"and replaced by this brief's trade (or just cancelled when you give none). manage_open: none.")
 
 
 # ------------------------------------------------------------------------------------------------- the state and the log
@@ -283,75 +303,236 @@ def _notify(s: Settings, level: str, title: str, text: str, key: str) -> None:
         notify(s, level, title, text, key=key, pair=s.scalp.pair)
 
 
-# ------------------------------------------------------------------------------------------------- placing
-def execute(s: Settings, rec: dict, *, symbol: str, equity: float | None, market_open: bool, now: int | None = None,
-            attach_fn: Callable[[Settings, str], tuple[Any, Any]] | None = None) -> dict:
-    """After the brief is stored: place THE trade when every gate passes. Returns the execution record (the caller
-    writes it into the brief record); ``decision`` = analyze | placed | skipped | failed."""
-    cfg = s.scalp
-    now = int(now if now is not None else now_ms())
-    st = read_settings(s)
+# ------------------------------------------------------------------------------------------------- the open trade
+def _live(be, entries: list[dict]) -> tuple[list, list]:
+    m = be.mt5
+    orders = [o for o in (m.orders_get() or ()) if be.mine(o)]
+    positions = [p for p in (m.positions_get() or ()) if be.mine(p)]
+    return orders, positions
+
+
+def _find(e: dict, orders: list, positions: list):
+    tagc = _comment_tag(str(e.get("brief_id")))
+    pos = next((p for p in positions if int(getattr(p, "ticket", -1)) == int(e["ticket"])
+                or str(getattr(p, "comment", "") or "").startswith(tagc)), None)
+    order = next((o for o in orders if int(getattr(o, "ticket", -1)) == int(e["ticket"])), None)
+    return pos, order
+
+
+def _in_profit(side: str, entry: float, bid: float, ask: float) -> bool:
+    spread = max(0.0, float(ask) - float(bid))
+    return (float(bid) > float(entry) + spread) if side == "BUY" else (float(ask) < float(entry) - spread)
+
+
+def open_snapshot(s: Settings, symbol: str, *, now: int | None = None,
+                  attach_fn: Callable[[Settings, str], tuple[Any, Any]] | None = None) -> dict | None:
+    """D-063: the tracked auto-trade as it is at the broker now (for the prompt): a ``position`` with its floating
+    P&L, minutes held and whether it is in profit beyond the spread; a ``pending`` order; ``{"kind": None}`` when the
+    tracked item is gone; None when nothing is tracked (no attach) or the terminal is away."""
     state = read_state(s)
-    kill = kill_switch_on(s, None) or kill_switch_on(s, cfg.pair)
-    kind, why = auto_gate(settings=st, rec=rec, equity=equity, cfg=cfg, kill=kill, market_open=market_open,
-                          open_now=len(state["open"]), execution_mode=s.execution.mode)
-    ex: dict[str, Any] = {"ts": now, "mode": st["mode"], "lot": st["lot"], "min_confidence": st["min_confidence"],
-                          "decision": "analyze" if st["mode"] != "auto" else "skipped" if kind != "place" else "pending",
-                          "why": why}
-    if st["mode"] != "auto":
-        return ex
-    if kind != "place":
-        log.info("scalp auto: no order - %s", why)
-        log_event(s, {"event": "refused", "brief_id": rec.get("id"), **ex})
-        _notify(s, "info", "Scalp AUTO: no order", why[:300], key=f"scalp:auto:{rec.get('id')}:refused")
-        return ex
-    idx = int(rec["trade"]["idx"])
-    plan = rec["brief"]["plans"][idx]
-    orec = order_rec(plan, as_of=int(rec["as_of_ms"]), window_min=cfg.trigger_window_min)
-    expires = int(rec["as_of_ms"]) + cfg.trigger_window_min * MS_PER_MINUTE
+    if not state["open"]:
+        return None
+    now = int(now if now is not None else now_ms())
     try:
         term, be = (attach_fn or attach)(s, symbol)
-    except Exception as exc:  # noqa: BLE001 - the terminal is not there: the brief stands, the order does not
-        ex.update(decision="failed", why=f"MT5: {type(exc).__name__}: {str(exc)[:200]}")
-        log.warning("scalp auto: %s", ex["why"])
-        log_event(s, {"event": "failed", "brief_id": rec.get("id"), **ex})
-        _notify(s, "warn", "Scalp AUTO: order NOT placed", ex["why"], key=f"scalp:auto:{rec.get('id')}:failed")
-        return ex
-    try:
-        res = be.place(decision_id=f"{COMMENT_PREFIX}{rec['id']}", symbol=symbol, rec=orec, lots=float(st["lot"]),
-                       entry=float(plan["entry"]), dry_run=False)
     except Exception as exc:  # noqa: BLE001
-        res = {"ok": False, "reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        log.warning("scalp auto snapshot: %s", f"{type(exc).__name__}: {str(exc)[:200]}")
+        return None
+    try:
+        orders, positions = _live(be, state["open"])
+        q = be.mt5.symbol_info_tick(symbol)
+        bid, ask = (float(q.bid), float(q.ask)) if q is not None else (None, None)
+        for e in state["open"]:
+            pos, order = _find(e, orders, positions)
+            if pos is not None:
+                filled = e.get("filled_ms")
+                if not filled:
+                    try:
+                        filled = be.model.server_to_utc(int(getattr(pos, "time_msc", 0) or 0), prefer="earlier")
+                    except Exception:  # noqa: BLE001
+                        filled = now
+                side = str(e.get("side"))
+                return {"kind": "position", "brief_id": e.get("brief_id"), "ticket": int(pos.ticket), "side": side,
+                        "entry": float(pos.price_open), "sl": float(pos.sl or 0) or None, "tp": float(pos.tp or 0) or None,
+                        "lot": float(pos.volume), "profit_usd": round(float(pos.profit) + float(getattr(pos, "swap", 0) or 0), 2),
+                        "price": (bid if side == "BUY" else ask), "held_min": max(0.0, (now - int(filled)) / MS_PER_MINUTE),
+                        "max_hold_min": int(e.get("max_hold_min") or 0), "filled_ms": int(filled),
+                        "in_profit": bool(bid is not None and _in_profit(side, float(pos.price_open), bid, ask))}
+            if order is not None:
+                return {"kind": "pending", "brief_id": e.get("brief_id"), "ticket": int(order.ticket), "side": e.get("side"),
+                        "order_type": f"{e.get('side')}_{'LIMIT' if 'LIMIT' in str(getattr(order, 'type', '')) else ''}".rstrip("_")
+                        if False else e.get("order_type") or f"{e.get('side')}_PENDING",
+                        "entry": float(order.price_open), "sl": float(order.sl or 0) or None, "tp": float(order.tp or 0) or None,
+                        "lot": float(getattr(order, "volume_current", e.get("lot") or 0)), "expires_ms": e.get("expires_ms")}
+        return {"kind": None}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("scalp auto snapshot failed: %s", f"{type(exc).__name__}: {str(exc)[:200]}")
+        return None
     finally:
         try:
             term.shutdown()
         except Exception:  # noqa: BLE001
             pass
-    ex["backend"] = {k: v for k, v in res.items() if k in ("ok", "reason", "placed", "note", "attempts")}
-    if res.get("ok"):
-        placed = (res.get("placed") or [{}])[0]
-        ticket = placed.get("order")
-        ex.update(decision="placed", ticket=ticket, order_type=orec["order_type"], side=plan["side"],
-                  entry=float(plan["entry"]), stop=float(plan["stop"]), target=float(plan["target"]),
-                  expires_ms=expires, max_hold_min=int(plan["max_hold_min"]), plan_idx=idx)
-        state["open"].append({"ticket": ticket, "brief_id": rec["id"], "idx": idx, "side": plan["side"],
-                              "symbol": symbol, "entry": float(plan["entry"]), "stop": float(plan["stop"]),
-                              "target": float(plan["target"]), "lot": float(st["lot"]), "placed_ms": now,
-                              "expires_ms": expires, "max_hold_min": int(plan["max_hold_min"]), "stage": "pending",
-                              "filled_ms": None})
-        write_state(s, state, now)
-        log.info("scalp auto: %s %s @ %s placed (ticket %s): %s", orec["order_type"], st["lot"], plan["entry"], ticket, why)
-        log_event(s, {"event": "placed", "brief_id": rec["id"], **ex})
-        _notify(s, "info", f"Scalp AUTO: {orec['order_type']} {st['lot']:g} @ {plan['entry']} placed",
-                f"SL {plan['stop']} / TP {plan['target']} · risk {risk_usd(plan, st['lot'], cfg.contract_size):.2f} USD "
-                f"· expires {iso(expires)[11:16]} UTC · closed after {plan['max_hold_min']} min · ticket {ticket}",
-                key=f"scalp:auto:{rec['id']}:placed")
-    else:
-        ex.update(decision="failed", why=str(res.get("reason") or "order refused")[:300])
-        log.warning("scalp auto: order not placed - %s", ex["why"])
-        log_event(s, {"event": "failed", "brief_id": rec["id"], **ex})
-        _notify(s, "warn", "Scalp AUTO: order NOT placed", ex["why"], key=f"scalp:auto:{rec['id']}:failed")
-    return ex
+
+
+# ------------------------------------------------------------------------------------------------- the brief acts
+def execute(s: Settings, rec: dict, *, symbol: str, equity: float | None, market_open: bool, now: int | None = None,
+            attach_fn: Callable[[Settings, str], tuple[Any, Any]] | None = None) -> dict:
+    """After the brief is stored (mode auto): (1) D-063 a tracked PENDING order that has not triggered is cancelled
+    (replaced by this brief's trade, or just cancelled); (2) a tracked POSITION gets the brief's ``manage_open``:
+    close / breakeven (when in profit) / hold; (3) THE trade is placed when every gate passes (one at a time: a held
+    position blocks it). Returns the execution record (the caller writes it into the brief record); ``decision`` =
+    analyze | placed | skipped | failed; ``managed`` = the management events."""
+    cfg = s.scalp
+    now = int(now if now is not None else now_ms())
+    st = read_settings(s)
+    state = read_state(s)
+    ex: dict[str, Any] = {"ts": now, "mode": st["mode"], "lot": st["lot"], "min_confidence": st["min_confidence"],
+                          "decision": "analyze", "why": "mode analyze: the owner trades by hand", "managed": []}
+    if st["mode"] != "auto":
+        return ex
+    brief = rec.get("brief") or {}
+    tr = rec.get("trade") or {}
+    has_plan = isinstance(tr.get("idx"), int)
+    term = be = None
+    if state["open"] or has_plan:
+        try:
+            term, be = (attach_fn or attach)(s, symbol)
+        except Exception as exc:  # noqa: BLE001 - the terminal is not there: the brief stands, nothing happens
+            ex.update(decision="failed", why=f"MT5: {type(exc).__name__}: {str(exc)[:200]}")
+            log.warning("scalp auto: %s", ex["why"])
+            log_event(s, {"event": "failed", "brief_id": rec.get("id"), **{k: v for k, v in ex.items() if k != "managed"}})
+            _notify(s, "warn", "Scalp AUTO: nothing done", ex["why"], key=f"scalp:auto:{rec.get('id')}:failed")
+            return ex
+    try:
+        # (1) + (2): what the previous briefs left
+        keep: list[dict] = []
+        if state["open"]:
+            orders, positions = _live(be, state["open"])
+            for e in state["open"]:
+                pos, order = _find(e, orders, positions)
+                if order is not None and pos is None:
+                    r = be.cancel_order(int(order.ticket))
+                    ev = {"event": "replaced" if has_plan else "cancelled", "brief_id": e.get("brief_id"), "ticket": e.get("ticket"),
+                          "side": e.get("side"), "entry": e.get("entry"), "stop": e.get("stop"), "target": e.get("target"),
+                          "lot": e.get("lot"), "ts": now, "ok": bool(r.get("ok")), "why": ("by brief " + str(rec.get("id")))
+                          + ("" if r.get("ok") else f" - cancel failed: {r.get('meaning')}")}
+                    ex["managed"].append(ev)
+                    log_event(s, ev)
+                    if r.get("ok"):
+                        _notify(s, "info", f"Scalp AUTO: pending {e.get('side')} @ {e.get('entry')} {ev['event']}",
+                                f"brief {rec.get('id')}: " + ("the new trade follows" if has_plan else "no trade now"),
+                                key=f"scalp:auto:{e.get('brief_id')}:{ev['event']}")
+                    else:
+                        keep.append(e)
+                        _notify(s, "warn", "Scalp AUTO: cancel failed", f"{e.get('brief_id')}: {r.get('meaning')}",
+                                key=f"scalp:auto:{e.get('brief_id')}:cancel_failed")
+                elif pos is not None:
+                    e = {**e, "stage": "position", "position_ticket": int(pos.ticket),
+                         "filled_ms": e.get("filled_ms") or now}
+                    decision = str(brief.get("manage_open") or "none")
+                    reason = str(brief.get("manage_reason") or "")[:300]
+                    q = be.mt5.symbol_info_tick(symbol)
+                    bid, ask = (float(q.bid), float(q.ask)) if q is not None else (None, None)
+                    pnl = round(float(pos.profit) + float(getattr(pos, "swap", 0) or 0), 2)
+                    base_ev = {"brief_id": e.get("brief_id"), "ticket": e.get("ticket"), "side": e.get("side"),
+                               "entry": float(pos.price_open), "stop": float(pos.sl or 0) or None, "target": float(pos.tp or 0) or None,
+                               "lot": float(pos.volume), "ts": now, "profit_usd": pnl, "by_brief": rec.get("id"), "reason": reason}
+                    if decision == "close":
+                        r = be.close_position(int(pos.ticket))
+                        ev = {**base_ev, "event": "managed_close", "ok": bool(r.get("ok")), "why": reason or "the brief closed it",
+                              "close": r.get("price")}
+                        if not r.get("ok"):
+                            ev["why"] = f"close failed: {r.get('meaning')}"
+                            keep.append(e)
+                        ex["managed"].append(ev)
+                        log_event(s, ev)
+                        _notify(s, "info" if r.get("ok") else "warn",
+                                f"Scalp AUTO: {e.get('side')} closed by the brief ({pnl:+.2f} USD)" if r.get("ok") else "Scalp AUTO: close failed",
+                                ev["why"], key=f"scalp:auto:{e.get('brief_id')}:managed_close")
+                    elif decision == "breakeven":
+                        side = str(e.get("side"))
+                        if bid is not None and _in_profit(side, float(pos.price_open), bid, ask) and not e.get("breakeven_ms"):
+                            r = be.modify_sl(int(pos.ticket), symbol, float(pos.price_open), float(pos.tp or 0) or None)
+                            ok = bool(r.get("ok")) or r.get("status") == "applied"
+                            ev = {**base_ev, "event": "managed_breakeven", "ok": ok,
+                                  "why": reason or "stop moved to the entry" if ok else f"breakeven {r.get('status')}: {r.get('meaning')}"}
+                            if ok:
+                                e = {**e, "breakeven_ms": now, "stop": float(pos.price_open)}
+                            _notify(s, "info" if ok else "warn", f"Scalp AUTO: {side} stop to breakeven" if ok else "Scalp AUTO: breakeven not applied",
+                                    ev["why"], key=f"scalp:auto:{e.get('brief_id')}:breakeven")
+                        else:
+                            ev = {**base_ev, "event": "managed_hold", "ok": True,
+                                  "why": ("breakeven already done; " if e.get("breakeven_ms") else "breakeven refused: not in profit beyond the spread; ") + reason}
+                            _notify(s, "info", f"Scalp AUTO: holding {side} ({pnl:+.2f} USD)", ev["why"], key=f"scalp:auto:{e.get('brief_id')}:hold:{rec.get('id')}")
+                        keep.append(e)
+                        ex["managed"].append(ev)
+                        log_event(s, ev)
+                    else:
+                        ev = {**base_ev, "event": "managed_hold", "ok": True, "why": reason or ("hold" if decision == "hold" else "no decision (none)")}
+                        keep.append(e)
+                        ex["managed"].append(ev)
+                        log_event(s, ev)
+                        _notify(s, "info", f"Scalp AUTO: holding {e.get('side')} ({pnl:+.2f} USD, {max(0.0, (now - int(e['filled_ms'])) / MS_PER_MINUTE):.0f} min)",
+                                ev["why"], key=f"scalp:auto:{e.get('brief_id')}:hold:{rec.get('id')}")
+                else:
+                    ev = {**e, "event": "settled", "stage": "settled", "settled_ms": now,
+                          "reason": "expired" if e.get("stage") == "pending" and now >= int(e.get("expires_ms") or 0) else
+                          "closed" if e.get("stage") == "position" else "gone"}
+                    ex["managed"].append({"event": "settled", "brief_id": e.get("brief_id"), "reason": ev["reason"], "ts": now})
+                    log_event(s, ev)
+            write_state(s, {"open": keep}, now)
+            state = {"open": keep}
+        # (3) THE trade
+        kill = kill_switch_on(s, None) or kill_switch_on(s, cfg.pair)
+        kind, why = auto_gate(settings=st, rec=rec, equity=equity, cfg=cfg, kill=kill, market_open=market_open,
+                              open_now=len(state["open"]), execution_mode=s.execution.mode)
+        ex.update(decision="skipped" if kind != "place" else "pending", why=why)
+        if kind != "place":
+            log.info("scalp auto: no order - %s", why)
+            log_event(s, {"event": "refused", "brief_id": rec.get("id"), **{k: v for k, v in ex.items() if k != "managed"}})
+            _notify(s, "info", "Scalp AUTO: no order", why[:300], key=f"scalp:auto:{rec.get('id')}:refused")
+            return ex
+        idx = int(tr["idx"])
+        plan = brief["plans"][idx]
+        orec = order_rec(plan, as_of=int(rec["as_of_ms"]), window_min=cfg.trigger_window_min)
+        expires = int(rec["as_of_ms"]) + cfg.trigger_window_min * MS_PER_MINUTE
+        try:
+            res = be.place(decision_id=f"{COMMENT_PREFIX}{rec['id']}", symbol=symbol, rec=orec, lots=float(st["lot"]),
+                           entry=float(plan["entry"]), dry_run=False)
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "reason": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        ex["backend"] = {k: v for k, v in res.items() if k in ("ok", "reason", "placed", "note", "attempts")}
+        if res.get("ok"):
+            placed = (res.get("placed") or [{}])[0]
+            ticket = placed.get("order")
+            ex.update(decision="placed", ticket=ticket, order_type=orec["order_type"], side=plan["side"],
+                      entry=float(plan["entry"]), stop=float(plan["stop"]), target=float(plan["target"]),
+                      expires_ms=expires, max_hold_min=int(plan["max_hold_min"]), plan_idx=idx)
+            state["open"].append({"ticket": ticket, "brief_id": rec["id"], "idx": idx, "side": plan["side"],
+                                  "symbol": symbol, "entry": float(plan["entry"]), "stop": float(plan["stop"]),
+                                  "target": float(plan["target"]), "lot": float(st["lot"]), "placed_ms": now,
+                                  "expires_ms": expires, "max_hold_min": int(plan["max_hold_min"]), "stage": "pending",
+                                  "filled_ms": None, "order_type": orec["order_type"]})
+            write_state(s, state, now)
+            log.info("scalp auto: %s %s @ %s placed (ticket %s): %s", orec["order_type"], st["lot"], plan["entry"], ticket, why)
+            log_event(s, {"event": "placed", "brief_id": rec["id"], **{k: v for k, v in ex.items() if k != "managed"}})
+            _notify(s, "info", f"Scalp AUTO: {orec['order_type']} {st['lot']:g} @ {plan['entry']} placed",
+                    f"SL {plan['stop']} / TP {plan['target']} · risk {risk_usd(plan, st['lot'], cfg.contract_size):.2f} USD "
+                    f"· expires {iso(expires)[11:16]} UTC · closed after {plan['max_hold_min']} min · ticket {ticket}",
+                    key=f"scalp:auto:{rec['id']}:placed")
+        else:
+            ex.update(decision="failed", why=str(res.get("reason") or "order refused")[:300])
+            log.warning("scalp auto: order not placed - %s", ex["why"])
+            log_event(s, {"event": "failed", "brief_id": rec["id"], **{k: v for k, v in ex.items() if k != "managed"}})
+            _notify(s, "warn", "Scalp AUTO: order NOT placed", ex["why"], key=f"scalp:auto:{rec['id']}:failed")
+        return ex
+    finally:
+        if term is not None:
+            try:
+                term.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ------------------------------------------------------------------------------------------------- managing
@@ -442,5 +623,6 @@ def manage(s: Settings, *, now: int | None = None, attach_fn: Callable[[Settings
 
 
 __all__ = ["MODES", "AUTO_ENTRY_TYPES", "scalp_magic", "default_settings", "validate_settings", "read_settings",
-           "write_settings", "execution_text", "read_state", "write_state", "log_event", "read_log", "risk_usd",
-           "order_rec", "auto_gate", "brief_id_of", "attach", "execute", "manage_decisions", "manage"]
+           "write_settings", "schedule", "execution_text", "open_trade_text", "open_snapshot", "read_state", "write_state",
+           "log_event", "read_log", "risk_usd", "order_rec", "auto_gate", "brief_id_of", "attach", "execute",
+           "manage_decisions", "manage"]

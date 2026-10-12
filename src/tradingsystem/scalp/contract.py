@@ -78,6 +78,10 @@ class ScalpBrief(_S):
                                   "the numbers of the plan best_plan points to; or 'no trade now' and why")
     best_plan: int | None = Field(default=None, ge=0, description="0-based index of the plan trade_call refers to "
                                   "(your best plan); null when there is none")
+    manage_open: Literal["none", "hold", "close", "breakeven"] = Field(
+        default="none", description="D-063: your decision on YOUR OPEN auto-trade shown in the user message - hold, "
+                                    "close now, or move the stop to the entry (breakeven); none when there is no open trade")
+    manage_reason: Text(300) = Field(default="", description="One sentence why (the owner's language)")
 
     @model_validator(mode="after")
     def _best_plan_exists(self) -> "ScalpBrief":

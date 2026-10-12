@@ -224,7 +224,7 @@ def test_dry_run_writes_the_record_md_latest_status_and_notifies_without_a_ledge
     assert rec["desk"]["equity"] == 100.36 and rec["desk"]["legs"] == [] and rec["desk"]["sides"] == []
     assert rec["brief"]["regime"] == "range" and len(rec["brief"]["levels"]) == 4 and len(rec["brief"]["plans"]) == 2
     assert set(rec["checks"]) == {"0", "1"} and rec["checks"]["0"]["rejected"] == []
-    assert len(rec["prompt_hash"]) == 16 and rec["prompt_versions"]["scalp/system"] == 3      # D-060 / D-061
+    assert len(rec["prompt_hash"]) == 16 and rec["prompt_versions"]["scalp/system"] == 4      # D-060 / 61 / 63
     assert rec["charts"] == []
     # the checks got the record's numbers and the desk's sides
     plan, kw = calls["check_plan"][0]

@@ -569,9 +569,11 @@ function scBriefHTML(rec, stats) {
   const exLine = ex ? (ex.decision === "placed" ? `<span class="pass">AUTO: ${esc(ex.order_type)} ${esc(ex.lot)} @ ${esc(ex.entry)} placed (ticket ${esc(ex.ticket)}, SL ${esc(ex.stop)} / TP ${esc(ex.target)}, expires ${tSafe(ex.expires_ms)}, hold ${esc(ex.max_hold_min)} min)</span>`
     : ex.decision === "analyze" ? `<span class="muted">execution: by hand (mode analyze, lot ${esc(ex.lot)})</span>`
     : `<span class="${ex.decision === "failed" ? "fail" : "muted"}">AUTO ${esc(ex.decision)}: ${esc(txt(ex.why, 200))}</span>`) : "";
+  const managed = (ex && ex.managed || []).map((m) => `<div class="small"><b>${esc(m.event)}</b> ${esc(m.side || "")} @ ${esc(m.entry ?? "—")}${m.profit_usd != null ? ` (${num(m.profit_usd)} $)` : ""}: ${esc(txt(m.why || m.reason, 200))}</div>`).join("");
+  const manageLine = b.manage_open && b.manage_open !== "none" ? `<p class="small ar" dir="auto"><b>الصفقة المفتوحة السابقة: ${esc(b.manage_open)}</b> ${esc(txt(b.manage_reason, 300))}</p>` : "";
   const prose = `<h2>The trade now (الصفقة المقترحة)${tradeIdx != null ? ` <span class="small muted">plan ${esc(tradeIdx + 1)}</span>` : ""}</h2>
     <p class="prewrap ar" dir="auto"><b>${tradeText || "—"}</b>${tradeLine ? `<br><span class="small">${tradeLine}</span>` : ""}${(trade.rejected || []).length ? `<br><span class="small fail">the model's own choice failed: ${esc((trade.rejected || []).join(", "))}</span>` : ""}</p>
-    ${exLine ? `<p class="small">${exLine}</p>` : ""}
+    ${manageLine}${exLine ? `<p class="small">${exLine}</p>` : ""}${managed}
     <h2>The picture (الصورة)</h2><p class="prewrap ar" dir="auto">${esc(b.picture)}</p>
     <h2>What to expect (المتوقَّع)</h2><p class="prewrap ar" dir="auto">${esc(b.expect)}</p>
     ${warn ? `<h2>The desk (تحذير النظام الآلي)</h2><p class="prewrap ar fail" dir="auto">${warn}</p>` : ""}`;

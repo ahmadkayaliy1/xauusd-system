@@ -44,6 +44,7 @@ OUTCOME_AR = {"not_triggered": "ما اتفعّلت", "target": "الهدف", "s
               "unknown": "بلا بيانات", "rejected": "مرفوضة", "untouched": "ما انلمس", "held": "صمد", "broken": "انكسر",
               "undecided": "ما انحسم"}
 NOTIFY_TEXT_MAX = 1500             # the Telegram message (the toast shows its first TOAST_TEXT_MAX characters)
+MANAGE_AR = {"hold": "نحافظ عليها (hold)", "close": "نسكّرها هلق (close)", "breakeven": "ننقل الوقف للدخول (breakeven)"}
 NO_TRADE_AR = "لا صفقة هلق"
 
 
@@ -352,6 +353,9 @@ def render_md(rec: dict, *, cap_pct: float = 5.0) -> str:
         p = (b.get("plans") or [])[int(tr["idx"])]
         out += [f"- الأرقام (خطة {int(tr['idx']) + 1}): {tr.get('line', '')}", f"- الشرط: {p.get('trigger', '')}",
                 f"- الإبطال: {p.get('invalidation', '')}"]
+    if (b.get("manage_open") or "none") != "none":
+        out += [f"- **الصفقة المفتوحة السابقة:** {MANAGE_AR.get(b['manage_open'], b['manage_open'])}"
+                + (f" - {b.get('manage_reason')}" if b.get("manage_reason") else "")]
     out += ["", "## الصورة", str(b.get("picture", "")), "", "## المتوقع", str(b.get("expect", ""))]
     out += ["", "## المستويات", "| السعر | النوع | الإطار | القوة | ليش |", "|---|---|---|---|---|"]
     for lv in b.get("levels") or []:
@@ -428,6 +432,9 @@ def notify_text(rec: dict, md: str | None = None) -> tuple[str, str]:
     if tr.get("idx") is not None:
         p = (b.get("plans") or [])[int(tr["idx"])]
         out += [f"الأرقام: {tr.get('line', '')}", f"الإبطال: {p.get('invalidation', '')}"]
+    if (b.get("manage_open") or "none") != "none":
+        out.append(f"الصفقة المفتوحة السابقة: {MANAGE_AR.get(b['manage_open'], b['manage_open'])}"
+                   + (f" - {b.get('manage_reason')}" if b.get("manage_reason") else ""))
     legs = desk.get("legs") or []
     if legs:
         out.append("النظام الآلي ماسك: " + "؛ ".join(

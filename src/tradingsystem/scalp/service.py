@@ -290,8 +290,16 @@ def _run_body(s: Settings, reg: InstrumentRegistry, exe, usage, *, reason: str, 
     except Exception:  # noqa: BLE001
         log.exception("scalp: the journal text failed - the model gets none this hour")
         jtext = ""
+    execution = None
+    try:                                               # D-063: the previous brief's auto-trade, for the prompt
+        at = _mod("autotrade")
+        open_info = at.open_snapshot(s, exe.symbol, now=as_of)
+        execution = at.execution_text(s, at.read_settings(s), desk.get("equity"), open_info)
+    except Exception:  # noqa: BLE001
+        log.exception("scalp: the open-trade snapshot failed - the model gets the plain execution line")
+        open_info = None
     system, user, versions = briefmod.compose(s, reg, inputs, reason=reason, desk=desk, manual_text=manual_text(manual),
-                                              journal_text=jtext)
+                                              journal_text=jtext, execution=execution)
     gen = None
     if no_model:
         try:
@@ -318,6 +326,7 @@ def _run_body(s: Settings, reg: InstrumentRegistry, exe, usage, *, reason: str, 
               for i, p in enumerate(brief.plans)}
     rec = briefmod.to_record(s, inputs=inputs, reason=reason, brief=brief, checks=checks, desk=desk, tol=tol, gen=gen,
                              system=system, versions=versions)
+    rec["open_before"] = open_info
     md = briefmod.render_md(rec, cap_pct=cfg.manual_risk_cap_pct)
     path = write_record(s, rec, md)
     log.info("scalp %s: brief %s stored (%s; %d levels, %d plans, no_scalp=%s)", reason, rec["id"], path,
