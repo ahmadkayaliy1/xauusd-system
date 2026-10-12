@@ -43,6 +43,8 @@ ENTRY_AR = {"limit": "limit", "stop": "stop", "market_after_rejection": "market 
 OUTCOME_AR = {"not_triggered": "ما اتفعّلت", "target": "الهدف", "stop": "الوقف", "expired": "انتهت المدة",
               "unknown": "بلا بيانات", "rejected": "مرفوضة", "untouched": "ما انلمس", "held": "صمد", "broken": "انكسر",
               "undecided": "ما انحسم"}
+NOTIFY_TEXT_MAX = 1500             # the Telegram message (the toast shows its first TOAST_TEXT_MAX characters)
+NO_TRADE_AR = "لا صفقة هلق"
 
 
 @dataclass
@@ -260,11 +262,54 @@ def to_record(s: Settings, *, inputs: Inputs, reason: str, brief: ScalpBrief, ch
             "spread_median": inputs.spread_median, "tol": tol, "blackout": inputs.blackout,
             "next_events": list(inputs.next_events), "news_windows": dict(inputs.news_windows), "desk": desk,
             "brief": brief.model_dump(), "checks": checks, "charts": list(inputs.charts), "score": None,
-            "scored_ms": None, "manual": []}
+            "scored_ms": None, "manual": [], "trade": trade_summary(brief.model_dump(), checks)}
 
 
 def _hm(ms: int | None) -> str:
     return dt.datetime.fromtimestamp(ms / 1000, dt.timezone.utc).strftime("%H:%M") if ms else "—"
+
+
+def _usd(a: Any, b: Any) -> str:
+    return f"{abs(float(a) - float(b)):.2f} $" if isinstance(a, (int, float)) and isinstance(b, (int, float)) else "—"
+
+
+def trade_summary(brief: dict, checks: dict[str, dict] | None = None) -> dict:
+    """D-060: THE trade of the hour - the plan ``best_plan`` names when it passed the code checks, else the
+    highest-confidence plan that passed, else none. ``text`` = the model's ``trade_call`` (or a code-built sentence
+    when it left it empty), ``line`` = the numbers (entry / stop / target / RR / confidence / hold), ``idx`` = the
+    plan's index or None, ``rejected`` = why the model's own choice was dropped (hard checks)."""
+    plans = list(brief.get("plans") or [])
+    checks = checks or {}
+
+    def rejected(i: int) -> list[str]:
+        return list((checks.get(str(i)) or {}).get("rejected") or [])
+
+    idx = brief.get("best_plan")
+    dropped: list[str] = []
+    if isinstance(idx, int) and 0 <= idx < len(plans) and rejected(idx):
+        dropped = rejected(idx)
+        idx = None
+    if not (isinstance(idx, int) and 0 <= idx < len(plans)):
+        ok = [i for i in range(len(plans)) if not rejected(i)]
+        idx = max(ok, key=lambda i: (plans[i].get("confidence") or 0, -i)) if ok else None
+    text = str(brief.get("trade_call") or "").strip()
+    if idx is None:
+        line = ""
+        if not text or dropped:
+            why = (brief.get("no_scalp") or [""])[0] if brief.get("no_scalp") else ""
+            text = NO_TRADE_AR + (f": {why}" if why else "") + (
+                f" (خطة الموديل سقطت بفحوصات الكود: {', '.join(dropped)})" if dropped else "")
+        return {"idx": None, "text": text, "line": line, "rejected": dropped}
+    p = plans[idx]
+    side = SIDE_AR.get(p.get("side"), p.get("side"))
+    line = (f"{side} من {_p(p.get('entry'))} ({ENTRY_AR.get(p.get('entry_type'), p.get('entry_type'))}) · "
+            f"الوقف {_p(p.get('stop'))} ({_usd(p.get('entry'), p.get('stop'))} للأونصة) · "
+            f"الهدف {_p(p.get('target'))} ({_usd(p.get('target'), p.get('entry'))} للأونصة) · RR {p.get('rr')} · "
+            f"ثقة {p.get('confidence')}% · المدة ≤ {p.get('max_hold_min')} د")
+    if not text or dropped:
+        text = (f"الصفقة: {side} من {_p(p.get('entry'))}، الوقف {_p(p.get('stop'))}، الهدف {_p(p.get('target'))}. "
+                f"الشرط: {p.get('trigger', '')}" + (f" (خطة الموديل الأولى سقطت: {', '.join(dropped)})" if dropped else ""))
+    return {"idx": idx, "text": text, "line": line, "rejected": dropped}
 
 
 def _p(x: Any) -> str:
@@ -297,6 +342,12 @@ def render_md(rec: dict, *, cap_pct: float = 5.0) -> str:
         out.append("**النظام الآلي ماسك:** " + "؛ ".join(
             f"{SIDE_AR.get(x.get('side'), x.get('side'))} {x.get('kind')} @ {_p(x.get('entry'))} "
             f"(SL {_p(x.get('sl'))} / TP {_p(x.get('tp'))})" for x in legs) + " — ما تعاكسو.")
+    tr = rec.get("trade") or trade_summary(b, rec.get("checks") or {})
+    out += ["", "## الصفقة المقترحة", f"**{tr.get('text', '')}**"]
+    if tr.get("idx") is not None:
+        p = (b.get("plans") or [])[int(tr["idx"])]
+        out += [f"- الأرقام (خطة {int(tr['idx']) + 1}): {tr.get('line', '')}", f"- الشرط: {p.get('trigger', '')}",
+                f"- الإبطال: {p.get('invalidation', '')}"]
     out += ["", "## الصورة", str(b.get("picture", "")), "", "## المتوقع", str(b.get("expect", ""))]
     out += ["", "## المستويات", "| السعر | النوع | الإطار | القوة | ليش |", "|---|---|---|---|---|"]
     for lv in b.get("levels") or []:
@@ -356,9 +407,42 @@ def render_md(rec: dict, *, cap_pct: float = 5.0) -> str:
 
 
 def notify_text(rec: dict, md: str | None = None) -> tuple[str, str]:
-    """``(title, text)`` of the toast / Telegram message: the hour, regime and bias; the first 600 characters."""
+    """``(title, text)`` of the toast / Telegram message (D-060): the trade first (what the owner acts on - the toast
+    shows only the first ``TOAST_TEXT_MAX`` characters), then the desk's holdings, the picture, the levels, the
+    no-scalp conditions and the news clock; ``NOTIFY_TEXT_MAX`` characters at most. ``md`` is accepted for
+    compatibility (the message is composed from the record, not cut from the markdown)."""
     b = rec.get("brief") or {}
+    desk = rec.get("desk") or {}
+    regime = REGIME_AR.get(b.get("regime"), str(b.get("regime")))
+    bias = BIAS_AR.get(b.get("bias"), str(b.get("bias")))
     title = f"Scalp {_hm(rec.get('as_of_ms'))} UTC — {b.get('regime')} / {b.get('bias')}"
     if b.get("no_scalp_now"):
         title += " — NO SCALP"
-    return title, (md if md is not None else render_md(rec))[:600]
+    tr = rec.get("trade") or trade_summary(b, rec.get("checks") or {})
+    out = [f"{regime} / {bias} ({b.get('bias_confidence', '—')}%)" + (" — لا سكالب هلق" if b.get("no_scalp_now") else ""),
+           f"الصفقة: {tr.get('text', '')}"]
+    if tr.get("idx") is not None:
+        p = (b.get("plans") or [])[int(tr["idx"])]
+        out += [f"الأرقام: {tr.get('line', '')}", f"الإبطال: {p.get('invalidation', '')}"]
+    legs = desk.get("legs") or []
+    if legs:
+        out.append("النظام الآلي ماسك: " + "؛ ".join(
+            f"{SIDE_AR.get(x.get('side'), x.get('side'))} {x.get('kind')} @ {_p(x.get('entry'))} "
+            f"(SL {_p(x.get('sl'))} / TP {_p(x.get('tp'))})" for x in legs) + " — ما تعاكسو.")
+    out += ["", f"الصورة: {b.get('picture', '')}", f"المتوقع: {b.get('expect', '')}"]
+    lv = b.get("levels") or []
+    if lv:
+        out.append("المستويات: " + " · ".join(
+            f"{_p(x.get('price'))} ({x.get('kind')}, {x.get('timeframe')}, "
+            f"{STRENGTH_AR.get(x.get('strength'), x.get('strength'))})" for x in lv))
+    others = [i for i in range(len(b.get("plans") or [])) if i != tr.get("idx")]
+    if others:
+        out.append("خطط تانية: " + " · ".join(
+            f"{SIDE_AR.get(p.get('side'), p.get('side'))} {_p(p.get('entry'))} / وقف {_p(p.get('stop'))} / هدف "
+            f"{_p(p.get('target'))} ({p.get('confidence')}%)" for p in ((b.get("plans") or [])[i] for i in others)))
+    if b.get("no_scalp"):
+        out.append("لا تسكالب إذا: " + " · ".join(str(x) for x in b["no_scalp"]))
+    if b.get("news_clock"):
+        out.append("الأخبار: " + " · ".join(str(x) for x in b["news_clock"]))
+    text = "\n".join(out)
+    return title, (text if len(text) <= NOTIFY_TEXT_MAX else text[:NOTIFY_TEXT_MAX - 1] + "…")

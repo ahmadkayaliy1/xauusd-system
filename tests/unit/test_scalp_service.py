@@ -224,7 +224,7 @@ def test_dry_run_writes_the_record_md_latest_status_and_notifies_without_a_ledge
     assert rec["desk"]["equity"] == 100.36 and rec["desk"]["legs"] == [] and rec["desk"]["sides"] == []
     assert rec["brief"]["regime"] == "range" and len(rec["brief"]["levels"]) == 4 and len(rec["brief"]["plans"]) == 2
     assert set(rec["checks"]) == {"0", "1"} and rec["checks"]["0"]["rejected"] == []
-    assert len(rec["prompt_hash"]) == 16 and rec["prompt_versions"]["scalp/system"] == 1
+    assert len(rec["prompt_hash"]) == 16 and rec["prompt_versions"]["scalp/system"] == 2      # D-060
     assert rec["charts"] == []
     # the checks got the record's numbers and the desk's sides
     plan, kw = calls["check_plan"][0]
@@ -244,12 +244,13 @@ def test_dry_run_writes_the_record_md_latest_status_and_notifies_without_a_ledge
     # no ledger row: the shared usage ledger was never even created
     assert not (s.paths.shared() / "ai_usage.db").exists()
     assert not (s.paths.state() / "app.db").exists()
-    # the notification: info, the hour in the title, the markdown's first 600 characters, the on-demand key
+    # the notification: info, the hour in the title, the trade first (D-060), the on-demand key
     assert len(sent) == 1
     n = sent[0]
     assert n["level"] == "info" and n["key"] == f"scalp:{bid}:manual" and n["pair"] == "XAUUSD"
     assert n["title"].startswith("Scalp 10:00 UTC — range / neutral") and "NO SCALP" not in n["title"]
-    assert n["text"] == md[:600] and len(n["text"]) <= 600
+    assert n["text"].splitlines()[1].startswith("الصفقة: بيع limit من 4186.0") and len(n["text"]) <= 1500
+    assert "## الصفقة المقترحة" in md and rec["trade"]["idx"] == 0
     # the locks are released
     assert FileLock(sdir / "run.lock").acquire(0) and FileLock(locks_dir(s) / sv.OPERATOR_LOCK).acquire(0)
 

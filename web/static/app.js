@@ -563,7 +563,11 @@ function scBriefHTML(rec, stats) {
       <div>Score</div><div>${score ? `${esc(score.summary?.plans_n ?? 0)} plans: ${esc(score.summary?.triggered ?? 0)} triggered, ${esc(score.summary?.target_first ?? 0)} target first, ${esc(score.summary?.stop_first ?? 0)} stop first, ${esc(score.summary?.expired ?? 0)} expired · levels touched ${esc(score.summary?.levels_touched ?? 0)}, held ${esc(score.summary?.levels_held ?? 0)} · ${scR(score.summary?.sum_r)} · scored ${tSafe(rec.scored_ms)}` : `<span class="muted">not scored yet (one hour after the brief, on the real ticks)</span>`}</div>
     </div></div>`;
   const warn = esc(txt(b.desk_warning, 400)), note = esc(txt(b.confidence_note, 300));
-  const prose = `<h2>The picture (الصورة)</h2><p class="prewrap ar" dir="auto">${esc(b.picture)}</p>
+  const trade = rec.trade || {}, tradeText = esc(txt(trade.text || b.trade_call || "", 500)), tradeLine = esc(txt(trade.line, 300));
+  const tradeIdx = Number.isInteger(trade.idx) ? trade.idx : null;
+  const prose = `<h2>The trade now (الصفقة المقترحة)${tradeIdx != null ? ` <span class="small muted">plan ${esc(tradeIdx + 1)}</span>` : ""}</h2>
+    <p class="prewrap ar" dir="auto"><b>${tradeText || "—"}</b>${tradeLine ? `<br><span class="small">${tradeLine}</span>` : ""}${(trade.rejected || []).length ? `<br><span class="small fail">the model's own choice failed: ${esc((trade.rejected || []).join(", "))}</span>` : ""}</p>
+    <h2>The picture (الصورة)</h2><p class="prewrap ar" dir="auto">${esc(b.picture)}</p>
     <h2>What to expect (المتوقَّع)</h2><p class="prewrap ar" dir="auto">${esc(b.expect)}</p>
     ${warn ? `<h2>The desk (تحذير النظام الآلي)</h2><p class="prewrap ar fail" dir="auto">${warn}</p>` : ""}`;
   const lvScore = (i) => (score?.levels || [])[i] || {};
@@ -573,7 +577,7 @@ function scBriefHTML(rec, stats) {
   const plans = (b.plans || []).map((p, i) => {
     const c = checks[String(i)] || null, rej = !!(c && (c.rejected || []).length), ps = plScore(i);
     const out = ps ? `${scOutcome(ps.outcome)}${ps.r != null ? ` <span class="${scCls(ps.r)}">${scR(ps.r)}</span>` : ""}${ps.minutes != null ? ` <span class="small muted">${esc(Math.round(ps.minutes))}m</span>` : ""}${ps.mfe_r != null ? `<div class="small muted">mfe ${scR(ps.mfe_r)} · mae ${scR(ps.mae_r)}</div>` : ""}` : `<span class="muted">—</span>`;
-    return `<tr class="${rej ? "rejected" : ""}${Number(p.confidence) < 50 ? " conf-low" : ""}"><td>${esc(i + 1)}${rej ? `<div class="small fail">rejected</div>` : ""}</td>
+    return `<tr class="${rej ? "rejected" : ""}${Number(p.confidence) < 50 ? " conf-low" : ""}"><td>${esc(i + 1)}${i === tradeIdx ? ` <span class="pass">★</span>` : ""}${rej ? `<div class="small fail">rejected</div>` : ""}</td>
       <td class="${p.side === "BUY" ? "buy" : "sell"}"><b>${esc(p.side)}</b><div class="small muted">${esc(p.entry_type)}</div></td>
       <td>${esc(p.level_price)}</td><td><b>${esc(p.entry)}</b></td><td>${esc(p.stop)} / ${esc(p.target)}<div class="small muted">rr ${esc(p.rr)} · hold ${esc(p.max_hold_min)}m</div></td>
       <td><b>${esc(p.confidence)}</b></td><td>${scCodeConf(stats, p.confidence)}</td>

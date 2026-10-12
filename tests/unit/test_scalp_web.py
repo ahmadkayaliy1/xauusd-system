@@ -13,7 +13,7 @@ BOOT = "/* ------------------------------------------------------------------ bo
 SCALP_JS = JS.split("D-058: the Scalp tab", 1)[1].split(BOOT, 1)[0]
 # the brief's free-text fields (contract.ScalpBrief / ScalpLevel / ScalpPlan) plus the record's markdown and the
 # checks' notes: whatever the model (or a tool) wrote
-TEXT_FIELDS = ("picture", "expect", "why", "trigger", "invalidation", "no_scalp", "news_clock", "desk_warning",
+TEXT_FIELDS = ("picture", "expect", "why", "trigger", "invalidation", "no_scalp", "news_clock", "desk_warning", "trade_call",
                "confidence_note", "md", "notes")
 SAFE_WRAPPERS = {"esc", "txt", "scList"}
 

@@ -36,7 +36,8 @@ def test_every_placeholder_filled_and_versions_recorded():
     # no $name is left in the scalp files' own text (the library's legend may use `$` in prose; it is appended verbatim)
     own = system.split(lib._read_versioned("shared/payload_legend.md")[0], 1)[0]
     assert not PLACEHOLDER.findall(own), PLACEHOLDER.findall(own)
-    assert versions["scalp/system"] == 1 and versions["scalp/instructions"] == 1
+    assert versions["scalp/system"] == 2 and versions["scalp/instructions"] == 2       # D-060: trade_call
+    assert "`trade_call`" in system and "`best_plan`" in system and "trade_call" in user
     assert "shared/payload_legend" in versions and "desks/xauusd_fields" in versions
     assert "<!-- prompt:" not in system and "<!-- prompt:" not in user
 

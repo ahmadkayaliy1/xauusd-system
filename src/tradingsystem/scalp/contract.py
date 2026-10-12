@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from ..ai.contract import Notes, Text, _M
 
@@ -19,7 +19,14 @@ Bias = Literal["bullish", "bearish", "neutral"]
 RR_TOLERANCE = 0.05            # the stated rr may differ this much (relative) from |target-entry| / |entry-stop|
 
 
-class ScalpLevel(_M):
+class _S(_M):
+    """The scalp models IGNORE keys outside the schema (the desk's answers forbid them): 2026-10-12 three of four
+    briefs added `strength_note` / `timeframe_note` to their levels and paid a repair call each (~22 s, ~21k input
+    tokens) for text that is thrown away anyway. A missing or wrong field is still rejected (and repaired once)."""
+    model_config = ConfigDict(extra="ignore")
+
+
+class ScalpLevel(_S):
     price: float = Field(gt=0, description="The level, in the analysis instrument's prices")
     kind: LevelKind
     timeframe: Literal["1h", "15m", "5m"]
@@ -27,7 +34,7 @@ class ScalpLevel(_M):
     why: Text(220) = Field(description="Why it matters this hour, from the payload (structure, zone, liquidity, clock)")
 
 
-class ScalpPlan(_M):
+class ScalpPlan(_S):
     level_price: float = Field(gt=0, description="The level this plan belongs to")
     side: Side
     trigger: Text(200) = Field(description="If price does X ... (what must happen first)")
@@ -53,7 +60,7 @@ class ScalpPlan(_M):
         return self
 
 
-class ScalpBrief(_M):
+class ScalpBrief(_S):
     regime: Regime
     bias: Bias
     bias_confidence: int = Field(ge=0, le=100)
@@ -66,3 +73,14 @@ class ScalpBrief(_M):
     news_clock: Notes(4) = Field(default_factory=list, description="The releases / clock events that matter this hour")
     desk_warning: Text(400) = Field(description="What the automatic desk holds and how a manual scalp must respect it")
     confidence_note: Text(300) = Field(default="", description="How the confidences were calibrated against the journal")
+    trade_call: Text(500) = Field(default="", description="THE one trade to take now, in the owner's language: side, "
+                                  "entry price, stop, target, the condition that must happen first, the time limit - "
+                                  "the numbers of the plan best_plan points to; or 'no trade now' and why")
+    best_plan: int | None = Field(default=None, ge=0, description="0-based index of the plan trade_call refers to "
+                                  "(your best plan); null when there is none")
+
+    @model_validator(mode="after")
+    def _best_plan_exists(self) -> "ScalpBrief":
+        if self.best_plan is not None and self.best_plan >= len(self.plans):
+            self.best_plan = None                   # a dangling index is not worth a repair call: the code picks
+        return self

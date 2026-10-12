@@ -1,6 +1,7 @@
-"""The scalp brief's notifications (D-058, plan §1.8): the title names the hour, regime and bias (and NO SCALP), the
-text is the markdown's first 600 characters (``TOAST_TEXT_MAX``), the dedupe key is one per hour for the loop's
-runs and a separate one for on-demand runs, a failure has one key per day. The notifier itself is disabled by the
+"""The scalp brief's notifications (D-058, plan §1.8; D-060): the title names the hour, regime and bias (and NO
+SCALP), the text puts THE trade first (entry / stop / target / condition - the toast shows its first 600 characters,
+Telegram up to ``NOTIFY_TEXT_MAX``), then the picture, the levels and the rest; the dedupe key is one per hour for
+the loop's runs and a separate one for on-demand runs, a failure has one key per day. The notifier itself is disabled by the
 suite (``TS_NOTIFY_DISABLE``): the real ``notify`` logs only, and that path is exercised once here."""
 from __future__ import annotations
 
@@ -45,11 +46,21 @@ def test_title_and_text_bounds(tmp_path):
     rec = record(tmp_path)
     title, text = bf.notify_text(rec)
     assert title == "Scalp 10:00 UTC — range / neutral"
-    assert len(text) == TOAST_TEXT_MAX == 600 and text == bf.render_md(rec)[:600]
-    assert text.startswith("# Scalp 10:00 UTC — تذبذب / محايد (55%)")
-    assert "النظام الآلي ماسك" in text and "شراء position @ 4180.00" in text   # the desk's leg is in the first lines
-    title, text = bf.notify_text(record(tmp_path, no_scalp_now=True, plans=[]))
-    assert title.endswith(" — NO SCALP") and "**لا سكالب هلق (NO SCALP)**" in text
+    assert len(text) <= bf.NOTIFY_TEXT_MAX == 1500 and TOAST_TEXT_MAX == 600
+    lines = text.splitlines()
+    assert lines[0] == "تذبذب / محايد (55%)"
+    assert lines[1].startswith("الصفقة: بيع limit من 4186.0 بعد لمسة تانية")            # the model's trade_call first
+    assert lines[2].startswith("الأرقام: بيع من 4186.00 (limit) · الوقف 4189.00 (3.00 $ للأونصة) · الهدف 4180.00 (6.00 $ للأونصة) · RR 2.0 · ثقة 55% · المدة ≤ 45 د")
+    assert lines[3].startswith("الإبطال: إغلاق 5m فوق 4187.0")
+    assert "النظام الآلي ماسك" in text[:TOAST_TEXT_MAX] and "شراء position @ 4180.00" in text   # the desk's leg too
+    assert "المستويات: " in text and "خطط تانية: شراء 4173.00 / وقف 4170.00 / هدف 4178.50 (48%)" in text
+    assert "لا تسكالب إذا: " in text
+    md = bf.render_md(rec)
+    assert "## الصفقة المقترحة" in md and "- الأرقام (خطة 1): بيع من 4186.00" in md
+    assert md.index("## الصفقة المقترحة") < md.index("## الصورة")
+    title, text = bf.notify_text(record(tmp_path, no_scalp_now=True, plans=[], best_plan=None, trade_call=""))
+    assert title.endswith(" — NO SCALP") and text.splitlines()[0].endswith(" — لا سكالب هلق")
+    assert text.splitlines()[1] == "الصفقة: لا صفقة هلق: ما تدخل بآخر 30 دقيقة قبل CPI (12:30 UTC) ولا بأول 30 بعدها."
     assert "## الخطط — ما في خطة هالساعة" in bf.render_md(record(tmp_path, no_scalp_now=True, plans=[]))
 
 
