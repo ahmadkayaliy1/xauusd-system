@@ -117,3 +117,10 @@
 - **إذا الرسائل بتوصل للسجل وما بتوصل للهاتف:** بمحادثة البوت: اسمو فوق > Notifications مفعّلة (مش Muted) + صوت. إعدادات Telegram > Notifications and Sounds > Private Chats مفعّلة. أندرويد: Settings > Apps > Telegram > Battery > Unrestricted + Allow background data. آيفون: Settings > Telegram > Notifications > Allow + Time Sensitive، وما يكون Focus / Do Not Disturb شغّال. ثبّت المحادثة.
 - **فحص سريع:** `.venv\Scripts\python.exe tools\notify.py --level info --title Test --text Hello` لازم يطبع `telegram: sent`؛ `owed: ...` = النت مقطوع هلق وبتوصل لاحقاً؛ `failed: HTTP 401/403` = التوكن غلط أو البوت محظور. التقرير اليومي يدوياً: `.venv\Scripts\python.exe tools\live_report.py --day YYYY-MM-DD --telegram`.
 - **الإعدادات:** `config\config.yaml` قسم `notify` (`rate_per_hour` 20 لكل مستوى بالساعة لكل عملية؛ `dedupe_minutes` 30: نفس الرسالة ما بتتكرّر بنص ساعة) و`monitor.daily_report_utc` ("00:30"؛ "" = إيقاف التقرير اليومي).
+
+## 14. التبديل بين التجريبي والحقيقي (D-064)
+- **terminal واحد:** سجّل الدخول بالحساب اللي بدّك ياه بنفس MetaTrader، وبعدها: `scripts\switch_mode.bat live` أو `scripts\switch_mode.bat demo`. أول مرة عالحقيقي: `scripts\switch_mode.bat live --adopt-server` (بياخد اسم السيرفر الحقيقي من الـ terminal للإعداد المحلي).
+- **شو بيعمل:** بيرفض إذا في صفقة أو أمر معلّق للنظام أو صفقة Scalp تلقائية مفتوحة، أو إذا الـ terminal مش على حساب من النوع المطلوب (تجريبي/حقيقي) وعلى السيرفر المكتوب. للحقيقي بيطلب تكتب `LIVE`. بعدها بيوقّف النظام والحلقة، بيكتب الوضع بالإعداد المحلي، بيشغّلهن، بيتأكّد إنو الـ executor اشتغل على الوضع الجديد، وبيبعتلك Telegram. فحص بس بلا تغيير: `.venv\Scripts\python.exe tools\switch_mode.py --check`.
+- **الحمايات بالكود:** النظام ما بيشتغل ولا بيبعت أمر إلا إذا الـ terminal على السيرفر ونوع الحساب المكتوبين للوضع الحالي. يعني لو غيّرت الحساب بالـ terminal من دون السكريبت، النظام بيوقف أوامرو بدل ما يغلط.
+- **Scalp التلقائي عالحقيقي:** مسموح (`scalp.auto_allow_live: true`)، بنفس الشروط (لوتك، حد الثقة، 5% مخاطرة، صفقة وحدة).
+- **تذكير:** كل تبديل والصفقات مسكّرة؛ صفقات الحساب التاني ما حدا بيديرها وقت ما تكون محوّل عنو (الوقف والهدف عند الوسيط بس).

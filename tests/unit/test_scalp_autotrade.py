@@ -141,7 +141,9 @@ def test_auto_gate_matrix(tmp_path):
     kind, why = at.auto_gate(**ok)
     assert kind == "place" and why.startswith("plan 1 SELL limit @ 4186.0 sl 4189.0 tp 4180.0 0.01 lots, risk 3.00 USD")
     assert at.auto_gate(**{**ok, "settings": {**auto, "mode": "analyze"}}) == ("skip", "mode analyze: the owner trades by hand")
-    assert at.auto_gate(**{**ok, "execution_mode": "live"})[1].startswith("execution.mode live: auto scalps run on the demo")
+    assert at.auto_gate(**{**ok, "execution_mode": "live"})[1].startswith("execution.mode live: auto scalps on the real account need")
+    live_ok = cfg.model_copy(update={"auto_allow_live": True})
+    assert at.auto_gate(**{**ok, "execution_mode": "live", "cfg": live_ok})[0] == "place"        # D-064: the owner allowed it
     assert at.auto_gate(**{**ok, "execution_mode": "paper"})[0] == "skip"
     assert at.auto_gate(**{**ok, "kill": True}) == ("skip", "kill switch on")
     assert at.auto_gate(**{**ok, "market_open": False}) == ("skip", "market closed")

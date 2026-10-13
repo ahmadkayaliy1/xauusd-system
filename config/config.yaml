@@ -418,6 +418,7 @@ scalp:                                 # D-058 (owner, 2026-10-12): the manual-s
   auto_max_lot: 0.10                   # the dashboard refuses a bigger lot
   auto_min_confidence: 55              # the default floor: a plan under it is analysed, never placed
   auto_risk_cap_pct: 5.0               # |entry - stop| x lot x contract_size must stay under this % of equity
+  auto_allow_live: false               # D-064: true = the auto-trades are placed on the REAL account too (the owner's call, config.local)
   contract_size: 100                   # XAUUSD: 100 oz per lot
   notify: true                         # core/notify: toast + Telegram (TELEGRAM_* in .env, docs/notifications.md H18)
   notify_level: info

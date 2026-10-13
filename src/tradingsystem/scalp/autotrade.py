@@ -227,8 +227,10 @@ def auto_gate(*, settings: dict, rec: dict, equity: float | None, cfg, kill: boo
     """``('place' | 'skip', why)`` for the brief ``rec`` under the owner's ``settings``. Pure."""
     if settings.get("mode") != "auto":
         return "skip", "mode analyze: the owner trades by hand"
-    if execution_mode != "demo":
-        return "skip", f"execution.mode {execution_mode}: auto scalps run on the demo account only (a decision of its own)"
+    if execution_mode == "live" and not getattr(cfg, "auto_allow_live", False):
+        return "skip", "execution.mode live: auto scalps on the real account need scalp.auto_allow_live: true (D-064)"
+    if execution_mode not in ("demo", "live"):
+        return "skip", f"execution.mode {execution_mode}: auto scalps need an MT5 account (demo or live)"
     tr = rec.get("trade") or {}
     plans = (rec.get("brief") or {}).get("plans") or []
     idx = tr.get("idx")

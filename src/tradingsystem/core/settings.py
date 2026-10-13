@@ -844,6 +844,7 @@ class ScalpCfg(_Model):
     auto_max_lot: float = Field(0.10, ge=0.01, le=10)     # the dashboard refuses a bigger lot
     auto_min_confidence: int = Field(55, ge=0, le=100)   # the default floor: a plan under it is not placed
     auto_risk_cap_pct: float = Field(5.0, gt=0, le=15)    # |entry - stop| x lot x contract <= this % of equity, else no order
+    auto_allow_live: bool = False                         # D-064 (owner): auto-trades on the REAL account too (execution.mode live)
     contract_size: float = Field(100.0, gt=0)             # XAUUSD: 100 oz per lot (the prompt's risk arithmetic)
 
     @model_validator(mode="after")
