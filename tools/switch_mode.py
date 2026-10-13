@@ -38,14 +38,18 @@ WAIT_STOP_S, WAIT_START_S = 120, 180
 
 # ------------------------------------------------------------------------------------------------- pure parts
 def precheck(current: str, target: str, executor: dict | None, scalp_open: list, account: dict | None,
-             profile_server: str, profile_kind: str) -> list[str]:
+             profile_server: str, profile_kind: str, env_mode: str | None = None) -> list[str]:
     """The reasons NOT to switch (empty = go). ``executor`` = the executor status row's detail (None when the system
     is not running), ``scalp_open`` = the scalp auto-trades still tracked, ``account`` = the terminal's account
-    (``server``, ``trade_mode``, ``login``; None = no terminal)."""
+    (``server``, ``trade_mode``, ``login``; None = no terminal), ``env_mode`` = ``EXECUTION_MODE`` from ``.env`` /
+    the environment (it overrides config.local, so it must agree with the target or be absent)."""
     out = []
     if target not in MODES:
         out.append(f"target must be demo or live (got {target!r})")
         return out
+    if env_mode and env_mode != target:
+        out.append(f"EXECUTION_MODE={env_mode} in .env (or the environment) overrides config.local: set it to "
+                   f"EXECUTION_MODE={target} or remove the line (the owner's file), then run again")
     if executor:
         if int(executor.get("open_positions") or 0) or int(executor.get("open_orders") or 0):
             out.append(f"the desk holds {executor.get('open_positions')} position(s) / {executor.get('open_orders')} "
@@ -114,11 +118,16 @@ def set_blocks(text: str, blocks: dict[str, dict]) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def blocks_for(target: str, live_server: str) -> dict[str, dict]:
+def blocks_for(target: str, live_server: str, terminal_path: str | None = None) -> dict[str, dict]:
+    """The config.local blocks of a mode. ``terminal_path`` = the ONE terminal (the demo profile's path): the live
+    profile uses it too (D-064: no second terminal)."""
     ex = {"mode": target}
     if target == "live":
         ex["live_confirmation"] = LIVE_CONFIRMATION_PHRASE
-    return {"execution": ex, "mt5": {"data_profile": target, "profiles": {"live": {"server": live_server}}}}
+    live = {"server": live_server}
+    if terminal_path:
+        live["terminal_path"] = terminal_path
+    return {"execution": ex, "mt5": {"data_profile": target, "profiles": {"live": live}}}
 
 
 # ------------------------------------------------------------------------------------------------- IO
@@ -217,9 +226,10 @@ def main(argv: list[str] | None = None) -> int:
     target = a.target or current
     pname = s.mt5.execution_profile_by_mode.get(target, target)
     profile = s.mt5.profiles[pname]
+    physical = s.mt5.profiles["demo"]                 # the ONE terminal both profiles use (D-064)
     ex = executor_detail(s)
     running = bool(ex and ex.get("_updated_ms") and time.time() * 1000 - ex["_updated_ms"] < 120_000)
-    acct = terminal_account(s, profile)
+    acct = terminal_account(s, physical)
     print(f"current mode: {current} ({'running' if running else 'not running'}); target: {target}")
     if acct:
         print(f"terminal: {acct['server']} / {acct['login']} ({'demo' if acct['trade_mode'] == 0 else 'REAL' if acct['trade_mode'] == 2 else 'contest'}), "
@@ -229,7 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     live_server = s.mt5.profiles["live"].server
     if a.adopt_server and target == "live" and acct and acct["trade_mode"] == 2:
         live_server = acct["server"]
-    problems = precheck(current, target, ex if running else None, scalp_open(s), acct, live_server, profile.account_type)
+    problems = precheck(current, target, ex if running else None, scalp_open(s), acct, live_server, profile.account_type,
+                        env_mode=(os.environ.get("EXECUTION_MODE") or "").strip().lower() or None)
     if target == current and not a.check:
         print(f"already in {current} mode" + (" (the terminal matches)" if not problems else ""))
         for p in problems:
@@ -262,7 +273,7 @@ def main(argv: list[str] | None = None) -> int:
     time.sleep(20)
     # 2. config.local
     text = LOCAL_CONFIG.read_text(encoding="utf-8") if LOCAL_CONFIG.exists() else ""
-    new = set_blocks(text, blocks_for(target, live_server))
+    new = set_blocks(text, blocks_for(target, live_server, physical.terminal_path))
     backup = LOCAL_CONFIG.with_name(f"config.local.before_switch_{int(time.time())}.yaml")
     if text:
         backup.write_text(text, encoding="utf-8", newline="\n")

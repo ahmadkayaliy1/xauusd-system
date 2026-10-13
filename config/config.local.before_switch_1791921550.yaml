@@ -1,0 +1,20 @@
+# Local overrides (git-ignored). One block per section: a repeated section key is refused (D-044 (7)).
+# Written 2026-09-28 (D-046 (e), H30) after the Phase 4 merge.
+ai:                                  # D-052 (owner, 2026-10-04): the gold desk trades all day; D-053 (owner, 2026-10-06):
+  daily_calls_per_pair: 250          # D-056 (2026-10-11): 250 for the 5-min looks while a trade is held (120 before; 60 / 30 earlier)
+  min_minutes_between_calls: 15
+  review_floor_minutes: 10
+  event_calls_per_day: 12
+monitor:
+  diagnose_enabled: false            # D-057 (2026-10-11): no Claude diagnosis session per warning - the shared plan is for the desk
+  outage_warn_min: 5                 # today's DNS/VPN bursts last 2-5 min; the default 10 never sees them
+  free_ram_warn_mb: 600              # this laptop runs at 300-500 MB free with three systems + the desktop app
+  free_disk_warn_gb: 8
+  vpn_adapter_names: ["Local Area Connection 4"]   # the ExpressVPN TUN Driver adapter (psutil name) - watched, never changed
+scalp:
+  enabled: true                      # D-058 (2026-10-12): on-demand briefs from the Scalp tab; the hourly loop only when scripts\start_scalp.bat runs it
+  min_free_ram_mb: 350               # 2026-10-12: this laptop never reaches the default 700 MB free while trading (230-650 MB seen,
+                                     # the desktop app ~1.2 GB + Edge + FDM + ChatGPT); the desk's own CLI calls already run at this level
+  auto_allow_live: true              # D-064 (owner, 2026-10-13): the scalp auto-trades run on the real account too once the mode is live
+operator:
+  enabled: false                     # 2026-10-13: the owner disabled the two Opus review tasks (H41); no "review overdue" warnings

@@ -34,6 +34,8 @@ def test_precheck_matrix():
     assert sm.precheck(**{**ok, "account": DEMO})[0].startswith("the terminal is logged into a demo account")
     assert sm.precheck(**{**ok, "account": {**REAL, "server": "Other-Real"}})[0].startswith("the terminal is on server 'Other-Real'")
     assert sm.precheck(**{**ok, "target": "paper"}) == ["target must be demo or live (got 'paper')"]
+    assert sm.precheck(**{**ok, "env_mode": "demo"})[0].startswith("EXECUTION_MODE=demo in .env")     # 2026-10-13: the real cause
+    assert sm.precheck(**{**ok, "env_mode": "live"}) == [] and sm.precheck(**{**ok, "env_mode": None}) == []
     # back to demo: the terminal must be on the demo account, not the real one
     back = dict(current="live", target="demo", executor=None, scalp_open=[], account=DEMO,
                 profile_server="WindsorBrokers1-Demo", profile_kind="demo")
@@ -51,10 +53,11 @@ def test_the_block_editor_replaces_only_its_sections_and_keeps_the_rest():
             "scalp:\n"
             "  enabled: true\n"
             "  auto_allow_live: true\n")
-    new = sm.set_blocks(text, sm.blocks_for("live", "WindsorBrokers1-Real1"))
+    new = sm.set_blocks(text, sm.blocks_for("live", "WindsorBrokers1-Real1", "C:/MT5/terminal64.exe"))
     doc = yaml.safe_load(new)
     assert doc["execution"] == {"mode": "live", "live_confirmation": LIVE_CONFIRMATION_PHRASE}
-    assert doc["mt5"] == {"data_profile": "live", "profiles": {"live": {"server": "WindsorBrokers1-Real1"}}}
+    assert doc["mt5"] == {"data_profile": "live", "profiles": {"live": {"server": "WindsorBrokers1-Real1",
+                                                                         "terminal_path": "C:/MT5/terminal64.exe"}}}
     assert doc["ai"] == {"daily_calls_per_pair": 250} and doc["scalp"] == {"enabled": True, "auto_allow_live": True}
     assert new.startswith("# header comment\nai:") and new.count("execution:") == 1 and new.count("mt5:") == 1
     # switching back replaces the blocks in place (one block per section), the phrase goes away
