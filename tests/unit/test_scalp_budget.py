@@ -37,3 +37,16 @@ def test_the_exclusion_is_by_role_only():
     import inspect
     src = inspect.getsource(budget.UsageStore.count_since)
     assert "NOT IN ('review', 'diagnose', 'scalp')" in src and "COALESCE(role, '')" in src
+
+
+def test_the_scalp_daily_cap_counts_answered_briefs_only(tmp_path):
+    """2026-10-14: two 180-s timeouts and a refused sign-in ate three of the owner's twelve daily briefs."""
+    from tradingsystem.ai.budget import UsageStore
+    st = UsageStore(tmp_path / "ai_usage.db")
+    try:
+        for ok in (1, 0, 0, 1):
+            st.record(None, provider="claude_code", model="claude-fable-5-1", purpose="scalp_brief", pair=None, ok=bool(ok),
+                      error=None if ok else "claude_code: no answer within 180s", role="scalp")
+        assert st.count_role_since("scalp", 0) == 4 and st.count_role_since("scalp", 0, ok_only=True) == 2
+    finally:
+        st.close()

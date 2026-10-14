@@ -104,9 +104,12 @@ class UsageStore:
         with self._lock:
             return int(self._con.execute(sql, args).fetchone()[0])
 
-    def count_role_since(self, role: str, since_ms: int, pair: str | None = None) -> int:
-        """Ledger rows of one role (e.g. 'escalation') since ``since_ms`` — for per-role daily limits."""
+    def count_role_since(self, role: str, since_ms: int, pair: str | None = None, *, ok_only: bool = False) -> int:
+        """Ledger rows of one role (e.g. 'escalation') since ``since_ms`` — for per-role daily limits. ``ok_only``:
+        answered calls only (2026-10-14: a timeout or a refused sign-in must not eat the scalp's daily briefs)."""
         sql, args = "SELECT count(*) FROM ai_usage WHERE role=? AND ts>=?", [role, since_ms]
+        if ok_only:
+            sql += " AND ok=1"
         if pair:
             sql, args = sql + " AND pair=?", args + [pair]
         with self._lock:

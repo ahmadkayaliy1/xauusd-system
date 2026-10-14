@@ -398,7 +398,7 @@ scalp:                                 # D-058 (owner, 2026-10-12): the manual-s
   hours_utc: [7, 16]                   # the DEFAULT window [start, end) UTC (London + New York); the owner sets the hours and the
                                        # cadence (every 15/20/30/60/120 min) on the Scalp tab (D-062); the button runs any time
   run_offset_s: 20                     # seconds after the full hour (the closed 5m bar must be stored first)
-  max_per_day: 12                      # model calls (ledger rows: a repair counts) per UTC day, hourly + on demand (~0.2 % of the weekly meter each on Fable)
+  max_per_day: 12                      # ANSWERED briefs per quota day (a repair counts; a timeout or a refused call does not) per UTC day, hourly + on demand (~0.2 % of the weekly meter each on Fable)
   charts: [1h, 15m, 5m]                # its own chart images (data\scalp\charts), not the desk's six
   min_free_ram_mb: 700                 # a run waits (then skips) below this free RAM; this laptop sits at 230-650 MB free with
                                        # the desktop app + browsers open, so config.local lowers it (2026-10-12)

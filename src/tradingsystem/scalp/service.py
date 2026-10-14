@@ -218,7 +218,7 @@ def run_once(s: Settings, *, reason: str = "manual", no_model: bool = False, fix
             while True:
                 t = clock()
                 eng, eng_age, exe_age = status_rows(s.paths.state() / "app.db", t)
-                used = usage.count_role_since("scalp", quota_day_start(t, tz))
+                used = usage.count_role_since("scalp", quota_day_start(t, tz), ok_only=True)   # answered briefs only
                 kind, why = gate(t, cfg, engine_detail=eng, engine_age_s=eng_age, executor_age_s=exe_age,
                                  free_ram_mb=_free_ram_mb(), used_today=used, market_open=cal.is_open(t),
                                  hourly=reason == "hourly", hours_utc=hours)
