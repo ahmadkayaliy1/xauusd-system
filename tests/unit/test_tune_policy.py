@@ -758,7 +758,8 @@ def test_the_script_runs_on_the_config_named_by_tradingsystem_config(tmp_path):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(yaml.safe_dump(raw), encoding="utf-8")
     DecisionStore(tmp_path / "data" / "instances" / PAIR / "app.db").close()
-    env = {**__import__("os").environ, "TRADINGSYSTEM_CONFIG": str(cfg), "TS_NOTIFY_DISABLE": "1"}
+    env = {**__import__("os").environ, "TRADINGSYSTEM_CONFIG": str(cfg), "TS_NOTIFY_DISABLE": "1",
+           "EXECUTION_MODE": "paper"}      # the checkout's .env may say live (2026-10-13); the fixture has no live phrase
     env.pop(INSTANCE_ENV, None)
 
     def cli(*args):
