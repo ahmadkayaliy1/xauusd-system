@@ -232,6 +232,10 @@ async def call_model(s: Settings, usage: UsageStore, system: str, user: str, ima
     name = provider_name(s)
     rm = s.ai.models.scalp
     prov = make_provider(s, name, model=rm.model, effort=rm.effort)
+    try:                                               # the scalp's own call timeout (the provider's 180 s is the desk's)
+        prov.cfg = prov.cfg.model_copy(update={"timeout_s": float(s.scalp.call_timeout_s)})
+    except Exception:  # noqa: BLE001 - a provider without a pydantic cfg keeps its own timeout
+        pass
     if hasattr(prov, "caps_dir"):
         prov.caps_dir = s.paths.shared()
     end = time.monotonic() + wait_s

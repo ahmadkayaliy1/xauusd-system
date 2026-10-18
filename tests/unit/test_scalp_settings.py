@@ -64,3 +64,33 @@ def test_this_folders_real_config_loads_with_scalp_off_and_fable_pinned():
     text = FOLDER.read_text(encoding="utf-8")
     assert "scalp: {model: claude-fable-5-1, effort: medium}" in text and "\nscalp:" in text
     assert "enabled: false" in text.split("\nscalp:", 1)[1]
+
+
+def test_the_scalp_call_timeout_is_its_own(monkeypatch):
+    """2026-10-18: the provider's 180 s is the desk's; two of 28 medium briefs timed out, a higher effort needs more."""
+    import asyncio
+    from tradingsystem.core.settings import INSTANCE_ENV, load_settings
+    from tradingsystem.scalp import brief as bf
+    s = load_settings(extra_env={INSTANCE_ENV: "XAUUSD"})
+    assert s.scalp.call_timeout_s == 300 and ScalpCfg(call_timeout_s=600).call_timeout_s == 600
+    seen = {}
+
+    class Prov:
+        cfg = s.ai.providers[bf.provider_name(s)]
+        availability_pending = False
+        caps_dir = None
+
+        def unavailable_reason(self):
+            return None
+
+    monkeypatch.setattr(bf, "make_provider", lambda s_, name, model=None, effort=None: Prov())
+
+    async def fake_generate(prov, *a, **kw):
+        seen["timeout"] = prov.cfg.timeout_s
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(bf, "generate_validated", fake_generate)
+    try:
+        asyncio.run(bf.call_model(s, None, "sys", "user", []))
+    except RuntimeError:
+        pass
+    assert seen["timeout"] == 300.0 and s.ai.providers[bf.provider_name(s)].timeout_s == 180

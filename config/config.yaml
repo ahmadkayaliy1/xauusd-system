@@ -410,6 +410,7 @@ scalp:                                 # D-058 (owner, 2026-10-12): the manual-s
   hold_window_min: 30                  # ... held / broken decided within this long after the first touch
   gate_retry_min: 20                   # a run waits this long for the desk's call / free RAM, then skips the hour
   run_timeout_s: 600                   # the run itself, after its gates; the loop kills a child only after gate_retry_min + this
+  call_timeout_s: 300                  # the Fable call itself (2 of 28 medium briefs hit the provider's 180 s; a higher effort needs more)
   manual_lookback_days: 7              # the owner's manual deals (magic 0) read from the running MT5 terminal; 0 = never
   # D-061 (2026-10-12): auto execution of THE trade - the owner switches mode (analyze | auto), the fixed lot and the
   # confidence floor on the Scalp tab (data\scalp\settings.json, no restart); the bounds and facts live here

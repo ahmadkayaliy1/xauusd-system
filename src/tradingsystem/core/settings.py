@@ -833,6 +833,7 @@ class ScalpCfg(_Model):
     hold_window_min: int = Field(30, ge=5, le=240)      # held / broken decided within this long after the touch
     gate_retry_min: int = Field(20, ge=0, le=59)        # a run waits this long for the desk's call / RAM, then skips
     run_timeout_s: int = Field(600, ge=60, le=1800)     # the run after its gates (the loop allows gate_retry_min on top)
+    call_timeout_s: int = Field(300, ge=60, le=900)     # the model call itself (the provider's timeout_s is the desk's, 180)
     manual_lookback_days: int = Field(7, ge=0, le=60)   # the owner's manual deals read from MT5 (0 = never attach)
     notify: bool = True
     notify_level: Literal["info", "warn"] = "info"
